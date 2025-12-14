@@ -1,0 +1,25 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Environments
+.env/
+.venv/
+venv/
+
+# Data
+data/
+*.npz
+*.h5
+*.pkl
+
+# OS files
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
+.idea/
+
