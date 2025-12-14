@@ -8,10 +8,12 @@ __pycache__/
 venv/
 
 # Data
-data/
-*.npz
-*.h5
-*.pkl
+diffusion_maps/data/cached_data/ksdata_chaotic_test_NT_12500000_SKP_500000_dt_0.01_ts_10.pkl
+diffusion_maps/data/cached_data/ksdata_chaotic_training_NT_15000000_SKP_500000_dt_0.01_ts_10.pkl
+
+# Figures
+*pics/
+
 
 # OS files
 .DS_Store

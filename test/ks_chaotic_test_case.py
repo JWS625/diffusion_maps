@@ -256,7 +256,7 @@ def batched_compute_inner_cv(
 
 def run_test(mode):
 
-    cv_path = (f"./numerical_results/ks_chaotic_cv_{mode}_{num_points}_{map_type}.pkl")
+    cv_path = f"./numerical_results/ks_chaotic_cv_results_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(cv_path, "rb") as f:
         cv_results = pickle.load(f)
 
@@ -303,10 +303,10 @@ def run_test(mode):
             taufs_block  = np.zeros(block_size)
             vpts_all_block  = np.zeros((block_size, test_trials))
 
-            for local_idx, i in enumerate(index_block):
+            for local_idx, i in tqdm(enumerate(index_block), total=block_size):
 
-                i_epsilon    = best_epsilon[i].reshape(1, -1)
-                i_lambda_reg = best_lambda_reg[i].reshape(1, -1)
+                i_epsilon    = best_epsilon[i]
+                i_lambda_reg = best_lambda_reg[i]
 
                 i_train = train[data_indices[i] : data_indices[i] + num_points]
                 local_opts = dict(opts)
@@ -326,7 +326,7 @@ def run_test(mode):
                 cp.fill_diagonal(distance_matrix, 0.0)
                 distance_matrix = 0.5 * (distance_matrix + distance_matrix.T)
 
-                model.fit_model(i_epsilon, i_lambda_reg, mode)
+                model.fit_model(i_epsilon, i_lambda_reg, mode, distance_matrix=distance_matrix)
 
                 vpt_sum = 0.0
                 tau_sum = 0.0
@@ -347,7 +347,7 @@ def run_test(mode):
                 taufs_block[local_idx]  = tau_sum / test_trials
 
             free_gpu_memory()
-            return index_block, vpts_block, taufs_block
+            return index_block, vpts_block, taufs_block, vpts_all_block
         
     results = Parallel(n_jobs=devices)(
         delayed(_run_test_block)(index_splits[dev], dev)
@@ -439,8 +439,8 @@ if __name__ == "__main__":
             for mode in mode_lst:
                 print(f"mode = {mode}")
 
-                run_val(mode)
-                free_gpu_memory()
-
-                # run_test(mode)
+                # run_val(mode)
                 # free_gpu_memory()
+
+                run_test(mode)
+                free_gpu_memory()

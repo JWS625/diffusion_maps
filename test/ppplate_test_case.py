@@ -5,7 +5,7 @@ import os
 
 import itertools
 import pickle
-import general_utils
+import krr_model
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -92,7 +92,7 @@ def test(mode):
     data_test_arr = np.asarray(data_test).squeeze()  # [steps, Nx]
     steps = data_test_arr.shape[0]
 
-    model = general_utils.modeler(**opts)
+    model = krr_model.modeler(**opts)
     model.fit_model(epsilon, lambda_reg, mode)
 
     _truePath     = cp.array(data_test_arr) #[steps, trials, Nx]
@@ -226,7 +226,7 @@ def compute_rmse_inner_cv(
         weights = np.exp(t_window-t_window[-1])
         weights = weights / np.linalg.norm(weights)
 
-        model = general_utils.modeler(**opts)
+        model = krr_model.modeler(**opts)
         model.fit_model(epsilon, lambda_reg, mode)
 
         _data_val_cp = cp.asarray(data_val)

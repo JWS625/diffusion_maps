@@ -1,7 +1,7 @@
 import os
 
 import cupy as cp
-import general_utils
+import krr_model
 import numpy as np
 
 # sphere
@@ -73,7 +73,7 @@ def batched_compute_inner_cv(
     with cp.cuda.Device(device):
 
         opts["data"] = k_train
-        model = general_utils.modeler(**opts)
+        model = krr_model.modeler(**opts)
 
         X = cp.asarray(model.inp, dtype=cp.float64)
         n = cp.sum(X * X, axis=1)
@@ -309,11 +309,13 @@ def run_test():
                 i_epsilon    = best_epsilon[i]
                 i_lambda_reg = best_lambda_reg[i]
 
+                print(i_epsilon.shape)
+
                 i_train = train[data_indices[i] : data_indices[i] + num_points]
                 local_opts = dict(opts)
                 local_opts["data"] = i_train
 
-                model = general_utils.modeler(**local_opts)
+                model = krr_model.modeler(**local_opts)
 
                 X = cp.asarray(model.inp, dtype=cp.float64)  # (N, d)
                 n = cp.sum(X * X, axis=1)                    # (N,)

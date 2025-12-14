@@ -5,7 +5,7 @@ import os
 
 import itertools
 import pickle
-import general_utils
+import krr_model
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -142,7 +142,7 @@ def test(mode):
     opts["inp"] = data_train_x
     opts["out"] = data_train_y
 
-    model = general_utils.modeler(**opts)
+    model = krr_model.modeler(**opts)
     model.fit_model(epsilon, lambda_reg, mode)
 
     data_test_arr = np.asarray(data_test).squeeze().reshape(test_trials, steps//2, d)  # [test_trials, steps, Nx]
@@ -256,7 +256,7 @@ def compute_rmse_inner_cv(
         np.random.shuffle(mask)
         opts["inp"] = data_train_x[mask]
         opts["out"] = data_train_y[mask]
-        model = general_utils.modeler(**opts)
+        model = krr_model.modeler(**opts)
 
         try:
             model.fit_model(epsilon, lambda_reg, mode)

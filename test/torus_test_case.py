@@ -2,7 +2,7 @@ import os
 
 
 import cupy as cp
-import general_utils
+import krr_model
 import numpy as np
 
 # sphere
@@ -54,7 +54,7 @@ def compute_error_inner(
     device,
 ):
     with cp.cuda.Device(device):
-        model = general_utils.modeler(**opts)
+        model = krr_model.modeler(**opts)
         l2_err_array = np.zeros_like(epsilon_array)
 
         for i, (epsilon, lambda_reg) in tqdm(
@@ -179,7 +179,7 @@ def evaluate_performance(epsilon, lambda_reg, device, trial_loop):
     trial_ind = 4 * trial_loop + device
     _x0 = x0_lst[trial_ind]
     with cp.cuda.Device(device):
-        model = general_utils.modeler(**opts)
+        model = krr_model.modeler(**opts)
         model.fit_model(epsilon, lambda_reg, mode)
 
         truePath = sth.generateData_(_x0, steps * dt, dt)
