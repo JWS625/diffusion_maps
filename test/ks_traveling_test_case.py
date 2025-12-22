@@ -1,11 +1,11 @@
-import os
+from pathlib import Path
+import sys
+root = Path.cwd().resolve().parents[1]
+sys.path.insert(0, str(root))
 
-# set wkdir to dm_final
-# os.chdir("dm_final")
+from diffusion_maps import model_dir, data_dir
 
-import itertools
 import pickle
-import krr_model
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -13,14 +13,13 @@ import cupy as cp
 import polars as pl
 from tqdm import tqdm
 
-from gindy.src.manifold import Manifold
-from dm_main import DMClass
+from src.krr_model import Modeler
+from src.dm_main import DMClass
+from src.utils import Manifold
 
-# np.random.seed(42)
 np.random.seed(1442)
 
 def to_numpy(x):
-    # cupy -> numpy, numpy stays numpy, python scalars -> numpy scalar
     try:
         import cupy as cp
         if isinstance(x, cp.ndarray):
@@ -32,12 +31,10 @@ def to_numpy(x):
 def to_pylist(x, dtype=np.float64):
     x = to_numpy(x)
     if x.dtype == object:
-        # ensure numeric, not object
         x = x.astype(dtype, copy=False)
     return x.tolist()
 
 def _to_float(x):
-    # Handle CuPy scalars/arrays, NumPy scalars/arrays, and Python floats
     try:
         if isinstance(x, cp.ndarray):
             return float(cp.asnumpy(x))
@@ -87,7 +84,7 @@ def main(mode):
     )
 
     pldf.write_parquet(
-        f"./numerical_results/ks_traveling_cv_{mode}_{num_points}_{map_type}_dt_0.02_seed_1442.parquet"
+        str(model_dir) + f"./ks_traveling/ks_traveling_cv_{mode}_{num_points}_{map_type}_dt_0.02.parquet"
     )
 
     free_gpu_memory()
@@ -100,7 +97,7 @@ def load_data():
     SKP = 500000
     DT = 0.001
     TS = 10
-    data = pickle.load(open(f"./ks_utils/ksdata_traveling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
+    data = pickle.load(open(str(data_dir) + f"/cached_data/ksdata_traveling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
     dt = data["dt"]
     nu = data["nu"]
     xx = data["x"]
@@ -111,7 +108,6 @@ def load_data():
     assert uu.shape == (Nt, Nx)
 
     data_train = uu[:num_points:2]
-    print(data_train.shape)
     dt = dt * 2
 
     data_train_x = data_train[:-1]
@@ -130,7 +126,7 @@ def load_data():
 def test(mode):
 
     cv_results = pl.read_parquet(
-        f"./numerical_results/ks_traveling_cv_{mode}_{num_points}_{map_type}_dt_0.02_seed_1442.parquet"
+        str(model_dir) + f"./ks_traveling/ks_traveling_cv_{mode}_{num_points}_{map_type}_dt_0.02.parquet"
     )
     cv_rmse = cv_results["rmse"]
     index = cv_rmse.arg_min()
@@ -142,8 +138,13 @@ def test(mode):
     opts["inp"] = data_train_x
     opts["out"] = data_train_y
 
-    model = krr_model.modeler(**opts)
-    model.fit_model(epsilon, lambda_reg, mode)
+    distance_matrix = cp.linalg.norm(
+                cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
+            )
+
+    model = Modeler(**opts)
+    
+    model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
 
     data_test_arr = np.asarray(data_test).squeeze().reshape(test_trials, steps//2, d)  # [test_trials, steps, Nx]
     truePath = cp.array(data_test_arr).transpose(1, 0, 2)  # [steps, trials, Nx]
@@ -179,7 +180,7 @@ def test(mode):
     results["path"] = pred_path
 
     results_path = (
-        f"./numerical_results/ks_traveling_{mode}_{num_points}_{map_type}_dt_0.02_seed_1442.pkl"
+        str(model_dir) + f"./ks_traveling/ks_traveling_{mode}_{num_points}_{map_type}_dt_0.02.pkl"
     )
     with open(results_path, 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -219,7 +220,7 @@ def batched_compute_rmse_inner_cv(
     with cp.cuda.Device(device):
         rmse_array = []
         try:
-            for epsilon, lambda_reg in tqdm(zip(epsilon_array, lambda_array)):
+            for epsilon, lambda_reg in tqdm(zip(epsilon_array, lambda_array), total=len(epsilon_array)):
                 try:
                     rmse = 0.0
                     for i in range(validation_repeats):
@@ -256,10 +257,13 @@ def compute_rmse_inner_cv(
         np.random.shuffle(mask)
         opts["inp"] = data_train_x[mask]
         opts["out"] = data_train_y[mask]
-        model = krr_model.modeler(**opts)
+        model = Modeler(**opts)
 
         try:
-            model.fit_model(epsilon, lambda_reg, mode)
+            distance_matrix = cp.linalg.norm(
+                cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
+            )
+            model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
 
             test_point = cp.asarray(data_val[0])
             path = [cp.array(test_point).get()]
@@ -268,7 +272,7 @@ def compute_rmse_inner_cv(
                 test_point = model.forecast(test_point)
                 path.append(test_point.get().flatten())
 
-            path = cp.asarray(path)  # [validation_horizon, Nx]
+            path = cp.asarray(path)
             error = path - cp.asarray(data_val[:len(path)])
             rmse = cp.sqrt(cp.mean((error)**2))
         except Exception as e:
@@ -290,7 +294,7 @@ if __name__ == "__main__":
     for map_type in map_type_lst:
         opts = {
             "map_type": map_type,
-            "norm": False,
+            "pipeline": "single"
         }
         for i_n, num_points in enumerate(num_points_lst):
             dt, data_train_x, data_train_y, data_val, data_test = load_data()

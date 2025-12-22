@@ -8,8 +8,14 @@ __pycache__/
 venv/
 
 # Data
-diffusion_maps/data/cached_data/ksdata_chaotic_test_NT_12500000_SKP_500000_dt_0.01_ts_10.pkl
-diffusion_maps/data/cached_data/ksdata_chaotic_training_NT_15000000_SKP_500000_dt_0.01_ts_10.pkl
+data/cached_data/*
+!data/cached_data/.gitkeep
+!data/figs/.gitkeep
+
+# Trained model directory
+trained_mdls/*
+!traind_mdls/.gitkeep
+
 
 # Figures
 *pics/

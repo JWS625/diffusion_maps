@@ -95,4 +95,4 @@ if ifsav:
         "nu": NU,
         "dt": DT * TS,
     }
-    pickle.dump(dat, open(f"./../../../ks_utils/ksdata_chaotic_test_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "wb"))
+    pickle.dump(dat, open(f"cached_data/ksdata_chaotic_test_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "wb"))

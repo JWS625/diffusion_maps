@@ -1,7 +1,7 @@
 import os
 import numpy as np
-import sphere_torus_utils.sphere_torus_helpers as sth
-import sphere_torus_utils.sphere_torus_data_gen as dg
+from . import sphere_torus_helpers as sth
+from . import sphere_torus_data_gen as dg
 
 
 def find_theta_and_phi(z):

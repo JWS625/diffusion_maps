@@ -1,277 +1,291 @@
-import sys
-# from typing import Tuple, Union
+from __future__ import annotations
 
-# sys.path.append("../")
-
+from typing import Optional, Tuple, Union
 import numpy as np
 import cupy as cp
-# import cupyx.scipy.sparse as cpsp
-
-from dataclasses import dataclass
 import cupyx.scipy.linalg
-import scipy
 
-@dataclass
+ArrayLike = Union[np.ndarray, cp.ndarray]
+
+
 class DMClass:
+    """
+    Compatibility goals:
+      - If P==1 and x.ndim==2: match legacy Code 2 numerics as closely as possible.
+      - If P>1 and/or x.ndim==3: match legacy Code 1 batch numerics as closely as possible.
+
+    Notes:
+      - This class supports epsilon/lambda_reg as scalar or (P,) vector.
+      - Training kernel:
+          * P==1: uses cp.linalg.norm distances (Code 2 style)
+          * P>1: uses a Gram-trick based distance->kernel path (Code 1 batch style)
+      - Test kernel:
+          * x.ndim==2 (requires P==1): uses cp.linalg.norm (Code 2 style)
+          * x.ndim==3: uses Gram trick (Code 1 style)
+    """
+
     def __init__(
         self,
-        data,
-        f,
-        epsilon: float,
-        lambda_reg: float,
+        data: ArrayLike,                  # (N, d)
+        f: ArrayLike,                     # (N,) or (N, out_dim)
+        epsilon: Union[float, ArrayLike], # scalar or (P,)
+        lambda_reg: Union[float, ArrayLike],  # scalar or (P,)
         mode: str = "rbf",
-        distance_matrix = None,
+        distance_matrix: Optional[ArrayLike] = None,  # (N,N) Euclidean distances (not squared)
+        dtype=cp.float64,
     ):
-        
-        # self.multiple_param_flag = True
-        epsilon = cp.asarray(epsilon)
-        if epsilon.ndim == 0:
-            # self.multiple_param_flag = False
-            epsilon = epsilon[None]
-
-        lambda_reg = cp.asarray(lambda_reg)
-        if lambda_reg.ndim == 0:
-            lambda_reg = lambda_reg[None]       
-        # assert len(data.shape) == 2, "Data must be of form (n, d)"
-        # assert len(f.shape) <= 2, "f must be of form (n,) or (n, k)"
-        # assert epsilon > 0, "Epsilon must be positive"
-        # assert lambda_reg >= 0, "Regularization parameter must be non-negative"
-
-        # if k is not None:
-        #     assert k > 0
-
-        self.data_old = data
-        self.epsilon = epsilon
-        self.lambda_reg = lambda_reg
-        
-        self.f = f
-        # self.DS = DS
-        self.kernel_matrix, self.q1, self.q2, self.distance_matrix = (
-            DMClass._compute_kernel_matrix_and_densities(data, epsilon, mode=mode, distance_matrix=distance_matrix)
-        )
+        if mode not in {"rbf", "diffusion"}:
+            raise ValueError("mode must be 'rbf' or 'diffusion'")
 
         self.mode = mode
-        # self.k = k
-        self.d = cp.shape(data)[1]
 
-        self.q1 = cp.asarray(self.q1) if self.q1 is not None else None
-        self.q2 = cp.asarray(self.q2) if self.q2 is not None else None
-        # if self.DS is False:
-        self._fit(self.f, lambda_reg)
-        # else:
-        #     self.SK_prepare()
+        self.data_old = cp.asarray(data, dtype=dtype)
+        if self.data_old.ndim != 2:
+            raise ValueError("data must be (N, d)")
+        self.N, self.d = self.data_old.shape
 
+        self.f = cp.asarray(f, dtype=dtype)
+        if self.f.ndim == 1:
+            self.f = self.f[:, None]
+        if self.f.ndim != 2 or self.f.shape[0] != self.N:
+            raise ValueError("f must be (N,) or (N, out_dim)")
 
-    def predict(self, x):
-        # print(f"x.shape = {x.shape}")
+        eps = cp.asarray(epsilon, dtype=dtype)
+        lam = cp.asarray(lambda_reg, dtype=dtype)
+        if eps.ndim == 0:
+            eps = eps[None]
+        if lam.ndim == 0:
+            lam = lam[None]
+        if eps.ndim != 1 or lam.ndim != 1:
+            raise ValueError("epsilon and lambda_reg must be scalar or 1D")
+        if eps.size != lam.size:
+            raise ValueError("epsilon and lambda_reg must have the same length (P)")
+        if cp.any(eps <= 0):
+            raise ValueError("epsilon must be positive")
+        if cp.any(lam < 0):
+            raise ValueError("lambda_reg must be nonnegative")
 
-        assert x.ndim == 2 or x.ndim == 3
+        self.epsilon = eps
+        self.lambda_reg = lam
+        self.P = int(eps.size)
 
-        kernel_matrix = self._kernel_eval(x)
-        if x.ndim==3:
-        #     output = cp.dot(kernel_matrix.T, self.beta)
-            output = cp.einsum("knm,knd->kmd", kernel_matrix, self.beta)
-        elif x.ndim==2:
-            # output = cp.einsum("knm,knd->kmd", kernel_matrix, self.beta)
-            output = cp.einsum("nm,knd->kmd", kernel_matrix, self.beta)
+        self.kernel_matrix, self.q1, self.q2, self.distance_matrix = self._compute_kernel_matrix_and_densities(
+            self.data_old,
+            self.epsilon,
+            mode=self.mode,
+            distance_matrix=distance_matrix,
+            dtype=dtype,
+        )
+
+        self._fit(self.f, self.lambda_reg)
+
+    # ------------------------ public API ------------------------
+
+    def predict(self, x: ArrayLike) -> cp.ndarray:
+        """
+        x:
+          - (m, d)          -> returns (m, out_dim)        [only if P==1]
+          - (P, m, d)       -> returns (P, m, out_dim)     [only if P>1]
+        """
+        x = cp.asarray(x, dtype=self.data_old.dtype)
+
+        if x.ndim <= 2 :
+            # compatibility with legacy: only allowed for P==1
+            if self.P != 1:
+                raise ValueError("For P>1, call predict with x shaped (P, m, d)")
+            K = self._kernel_eval(x)          # (N, m)
+            out = cp.dot(K.T, self.beta)      # (m, out_dim)
+            return out
+
+        elif x.ndim == 3:
+            K = self._kernel_eval(x)          # (P, N, m)
+            out = cp.einsum("pnm,pnd->pmd", K, self.beta)  # (P, m, out_dim)
+            return out
+        
         else:
-            ValueError("Unvalid epsilon shape. It has to be either scalar or 1D array.")
+            raise ValueError("x must be 2D (m,d) or 3D (P,m,d)")
 
-        return output
-
-
-    def _fit(self, f, lambdaReg):
-        eps = self.epsilon
-        lam = cp.asarray(lambdaReg)
-        P   = eps.shape[0]
-        p, N, N2 = self.kernel_matrix.shape
-        assert p == P and N == N2
-
-        self.beta = DMClass._solve(cp.array(self.kernel_matrix) \
-            + lam[:, None, None] * cp.eye(N)[None, :, :], cp.array(f))
-
-
+    def _fit(self, f: cp.ndarray, lambda_reg: cp.ndarray) -> None:
+        if self.P == 1:
+            lam0 = lambda_reg[0]
+            A = self.kernel_matrix + lam0 * cp.eye(self.N, dtype=self.kernel_matrix.dtype)
+            self.beta = self._solve_2d(A, f)  # (N, out_dim)
+        else:
+            lam = cp.asarray(lambda_reg, dtype=self.kernel_matrix.dtype)  # (P,)
+            I = cp.eye(self.N, dtype=self.kernel_matrix.dtype)[None, :, :]  # (1,N,N)
+            A = self.kernel_matrix + lam[:, None, None] * I               # (P,N,N)
+            self.beta = self._solve_batched(A, f)                         # (P,N,out_dim)
 
     @staticmethod
-    def _solve(psd_matrix, X):
-        # solve random_psd_matrix_gpu @ z = X for z
-        # psd_matrix must be positive semi-definite matrix or else this will fail
-        psd_matrix = cp.asarray(psd_matrix)
-        X = cp.asarray(X)
+    def _solve_2d(A: cp.ndarray, B: cp.ndarray) -> cp.ndarray:
+        A = cp.asarray(A)
+        B = cp.asarray(B)
+        if B.ndim == 1:
+            B = B[:, None]
+        L = cp.linalg.cholesky(A)
+        Z0 = cupyx.scipy.linalg.solve_triangular(L, B, lower=True)
+        Z1 = cupyx.scipy.linalg.solve_triangular(L, Z0, lower=True, trans=1)
+        return Z1
 
-        if psd_matrix.ndim == 2:
-            A = cp.linalg.cholesky(psd_matrix)
-            Z0 = cupyx.scipy.linalg.solve_triangular(A, X, lower=True)
-            Z1 = cupyx.scipy.linalg.solve_triangular(A, Z0, trans=1, lower=True)
-            return Z1
-        
-        if psd_matrix.ndim == 3:
-            P, N, N2 = psd_matrix.shape
-            assert N == N2, "psd_matrix must be (K, N, N)"
+    @staticmethod
+    def _solve_batched(A: cp.ndarray, B: cp.ndarray) -> cp.ndarray:
+        """
+        A: (P, N, N)
+        B: (N, out_dim) or (P, N, out_dim)
+        returns: (P, N, out_dim)
+        """
+        A = cp.asarray(A)
+        B = cp.asarray(B)
 
-            if X.ndim == 1:
-                X = X[None, :, None]
-                X = cp.broadcast_to(X, (P, N, 1))
-            elif X.ndim == 2:
-                # (N, d) -> (P, N, d)
-                X = X[None, :, :]
-                X = cp.broadcast_to(X, (P, N, X.shape[-1]))
-            elif X.ndim == 3:
-                # (P, N, d): assume already aligned
-                assert X.shape[0] == P and X.shape[1] == N, \
-                    "For batched solve, X must be (P, N, d) if 3D."
-            else:
-                raise ValueError(f"Unsupported X.ndim={X.ndim} for batched _solve")
+        P, N, N2 = A.shape
+        if N != N2:
+            raise ValueError("A must be (P,N,N)")
 
-            Z = cp.empty_like(X)
-            A = cp.linalg.cholesky(psd_matrix)   # (P, N, N)
+        if B.ndim == 1:
+            B = B[:, None]         # (N,1)
+            B = B[None, :, :]      # (1,N,1)
+            B = cp.broadcast_to(B, (P, N, 1))
+        elif B.ndim == 2:
+            B = B[None, :, :]      # (1,N,out_dim)
+            B = cp.broadcast_to(B, (P, N, B.shape[-1]))
+        elif B.ndim == 3:
+            if B.shape[0] != P or B.shape[1] != N:
+                raise ValueError("For batched solve, B must be (P, N, out_dim)")
+        else:
+            raise ValueError("Unsupported B.ndim")
 
-            for p in range(P):
-                A_p = A[p]                                    # (N, N)
-                Z0 = cupyx.scipy.linalg.solve_triangular(A_p, X[p], lower=True)   # (N, d)
-                Z[p] = cupyx.scipy.linalg.solve_triangular(A_p, Z0, trans=1, lower=True)
+        L = cp.linalg.cholesky(A)  # (P,N,N)
+        Z1 = cp.empty_like(B)
+        for p in range(P):
+            Z0 = cupyx.scipy.linalg.solve_triangular(L[p], B[p], lower=True)
+            Z1[p] = cupyx.scipy.linalg.solve_triangular(L[p], Z0, lower=True, trans=1)
+        return Z1
 
-            return Z
+    def _kernel_eval(self, x: cp.ndarray) -> cp.ndarray:
+        """
+        Returns:
+          - if P==1 and x is (m,d): (N,m)   [Code 2 style: direct norm]
+          - if P>1 and x is (P,m,d): (P,N,m) [Code 1 style: Gram trick]
+        """
+        X = self.data_old  # (N,d)
+        N, d = X.shape
 
-    
-    def _kernel_eval(self, x):
+        if x.ndim == 1:
+            x = x[None]
 
-        x = cp.asarray(x)
-        assert x.ndim == 3
+        if x.ndim == 2:
+            if self.P != 1:
+                raise ValueError("x.ndim==2 is only supported for P==1")
+            if x.shape[1] != d:
+                raise ValueError(f"x has d={x.shape[1]} but training data has d={d}")
 
-        eps = cp.asarray(self.epsilon)
+            dist = cp.linalg.norm(X[:, None] - x[None, :], axis=-1)  # (N,m) direct norm
+            K = cp.exp(-(dist**2) / (4.0 * self.epsilon[0]))
 
-        # if x.ndim == 2:
-        #     print(f"x.ndim==2")
-        #     distance_matrix = cp.linalg.norm(
-        #         self.data_old[:, None, :] - x[None, :, :],
-        #         axis=-1
-        #     )
+            if self.mode == "diffusion":
+                q1 = self.q1
+                q2 = self.q2
+                assert q1 is not None and q2 is not None
 
-        #     kernel_matrix = cp.exp(-distance_matrix**2 / (4.0 * eps.squeeze()))
+                q = cp.power(cp.mean(K, axis=0), -1)          # (m,)
+                K = cp.einsum("ij,j,i->ij", K, q, q1)
+                q = cp.power(cp.mean(K, axis=0), -1 / 2)      # (m,)
+                K = cp.einsum("ij,j,i->ij", K, q, q2)
 
-        #     if self.mode == "diffusion":
-        #         assert self.q1 is not None
-        #         assert self.q2 is not None
+            return K  # (N,m)
 
-        #         # q from current kernel
-        #         q = cp.power(cp.mean(kernel_matrix, axis=0), -1)  # (m,)
-        #         kernel_matrix = cp.einsum("ij,j,i->ij", kernel_matrix, q, self.q1)
+        P, m, d2 = x.shape
+        if d2 != d:
+            raise ValueError(f"x has d={d2} but training data has d={d}")
 
-        #         if self.DS:
-        #             q = cp.power(cp.dot(self.q2, kernel_matrix), -1)  # (m,)
-        #             kernel_matrix = cp.einsum("ij,j,i->ij", kernel_matrix, q, self.q2)
-        #         else:
-        #             q = cp.power(cp.mean(kernel_matrix, axis=0), -1 / 2)  # (m,)
-        #             kernel_matrix = cp.einsum("ij,j,i->ij", kernel_matrix, q, self.q2)
+        Y = x.reshape(P * m, d)  # (Pm,d)
 
-        #     return kernel_matrix  # (N, m)
+        XX = cp.sum(X * X, axis=1)[:, None]      # (N,1)
+        YY = cp.sum(Y * Y, axis=1)[None, :]      # (1,Pm)
+        dist2 = XX + YY - 2.0 * (X @ Y.T)        # (N,Pm)
+        cp.maximum(dist2, 0.0, out=dist2)
 
-        # if x.ndim == 3:
-        # print(f"x.ndim==3")
-        P, m, d = x.shape
-        X = self.data_old  
-        N = X.shape[0]
-        
-        Y = x.reshape(P * m, d)  
-
-        XX = cp.sum(X * X, axis=1)[:, None]   # (N, 1)
-        YY = cp.sum(Y * Y, axis=1)[None, :]   # # (1, Pm)
-
-        dist2 = XX + YY - 2.0 * (X @ Y.T)     # (N, Pm)
-        cp.maximum(dist2, 0.0, out=dist2)     # clip tiny negatives
-
-        dist2 = dist2.reshape(N, P, m)        # (N, P, m)
-        dist2 = dist2.transpose(1, 0, 2)      # (P, N, m)
-
-        eps_b   = eps[:, None, None]         # (1, 1, 1)
-
-        kernel_matrix = cp.exp(-dist2 / (4.0 * eps_b))  # (P, N, m)
+        dist2 = dist2.reshape(N, P, m).transpose(1, 0, 2)  # (P,N,m)
+        eps = self.epsilon[:, None, None]                   # (P,1,1)
+        K = cp.exp(-dist2 / (4.0 * eps))                    # (P,N,m)
 
         if self.mode == "diffusion":
-            assert self.q1 is not None
-            assert self.q2 is not None
+            q1 = self.q1
+            q2 = self.q2
+            assert q1 is not None and q2 is not None  # (P,N)
 
-            q = cp.power(cp.mean(kernel_matrix, axis=1), -1)  # (P, m)
+            q = cp.power(cp.mean(K, axis=1), -1)              # (P,m)
+            K = cp.einsum("pnm,pm,pn->pnm", K, q, q1)
 
-            kernel_matrix = cp.einsum(
-                "pnm,pm,pn->pnm",
-                kernel_matrix,   # (p, N, m)
-                q,               # (p, m)
-                self.q1          # (p, N)
-            )
+            q = cp.power(cp.mean(K, axis=1), -1 / 2)          # (P,m)
+            K = cp.einsum("pnm,pm,pn->pnm", K, q, q2)
 
-
-            # mean over N, exponent -1/2
-            q = cp.power(cp.mean(kernel_matrix, axis=1), -1 / 2)  # (p, m)
-            kernel_matrix = cp.einsum(
-                "knm,km,kn->knm",
-                kernel_matrix,
-                q,
-                self.q2,
-            )
-
-        return kernel_matrix  # (p, N, m)
+        return K  # (P,N,m)
 
     @staticmethod
     def _compute_kernel_matrix_and_densities(
-        data, epsilon, mode, distance_matrix=None, dtype=cp.float64,
-    ):
+        data: cp.ndarray,
+        epsilon: cp.ndarray,  # (P,)
+        mode: str,
+        distance_matrix: Optional[ArrayLike] = None,  # (N,N) Euclidean distances (not squared)
+        dtype=cp.float64,
+    ) -> Tuple[cp.ndarray, Optional[cp.ndarray], Optional[cp.ndarray], cp.ndarray]:
         """
-        Compute RBF or diffusion kernel matrix from data.
-        Uses sparse matrix if k is provided (i.e., k-NN kernel).
+        Training kernel builder.
 
-        Args:
-            data: (n, d) input data
-            epsilon: float for Gaussian kernel
-            mode: "rbf" or "diffusion"
-            distance_matrix: optional (n, n) matrix of pairwise distances
-            k: number of neighbors to keep (if None, full dense kernel is used)
-
-        Returns:
-            kernel_matrix: dense or sparse kernel
-            q1, q2: normalization vectors (None if mode == "rbf")
-            distance_matrix: full or kNN-masked
+        Compatibility rule:
+          - P==1: match Code 2 => use cp.linalg.norm if distance_matrix not provided.
+          - P>1: match Code 1 batch style => use Gram trick (dist2 = xx+yy-2xy).
         """
-        assert mode in {"rbf", "diffusion"}
-        if epsilon.ndim == 0:
-            epsilon = epsilon[None]
+        X = cp.asarray(data, dtype=dtype)
+        N, d = X.shape
 
-        epsilon = cp.asarray(epsilon)
-        P = epsilon.shape[0]
+        eps = cp.asarray(epsilon, dtype=dtype)
+        if eps.ndim == 0:
+            eps = eps[None]
+        P = int(eps.size)
 
-        if distance_matrix is None:
-            X = cp.asarray(data, dtype=cp.float64)  # (N, d)
-            n = cp.sum(X * X, axis=1)                    # (N,)
-
-            distance_matrix = X @ X.T
-            distance_matrix *= -2.0
-            distance_matrix += n[:, None]
-            distance_matrix += n[None, :]
-            cp.maximum(distance_matrix, 0.0, out=distance_matrix)
-            cp.sqrt(distance_matrix, out=distance_matrix)
-            cp.fill_diagonal(distance_matrix, 0.0)
-            distance_matrix = 0.5 * (distance_matrix + distance_matrix.T)
-            base_dist = distance_matrix
+        if distance_matrix is not None:
+            base_dist = cp.asarray(distance_matrix, dtype=dtype)
         else:
-            base_dist = distance_matrix
+            if P == 1:
+                base_dist = cp.linalg.norm(X[:, None] - X[None, :], axis=-1)  # (N,N)
+            else:
+                n = cp.sum(X * X, axis=1)                      # (N,)
+                dist2 = n[:, None] + n[None, :] - 2.0 * (X @ X.T)
+                cp.maximum(dist2, 0.0, out=dist2)
+                base_dist = cp.sqrt(dist2)
+                base_dist = 0.5 * (base_dist + base_dist.T)
+                cp.fill_diagonal(base_dist, 0.0)
 
-            
-        base_dist = base_dist[None, :, :]
-        epsilon = epsilon[:, None, None]
-        kernel_matrix = cp.exp(-(base_dist**2) / (4 * epsilon))
+        # keep stored distance_matrix in Euclidean form (like Code 2/Code 1)
+        distance_matrix_out = base_dist
+
+        # ---- Build kernel ----
+        if P == 1:
+            K = cp.exp(-(base_dist**2) / (4.0 * eps[0]))  # (N,N)
+
+            if mode == "rbf":
+                return K, None, None, distance_matrix_out
+
+            q1 = cp.power(cp.mean(K, axis=-1), -1)        # (N,)
+            K = cp.einsum("ij,i,j->ij", K, q1, q1)
+            q2 = cp.power(cp.mean(K, axis=-1), -1 / 2)    # (N,)
+            K = cp.einsum("ij,i,j->ij", K, q2, q2)
+
+            return K, q1, q2, distance_matrix_out
+
+        # P>1 => (P,N,N)
+        base2 = (base_dist**2)[None, :, :]                          # (1,N,N)
+        K = cp.exp(-(base2) / (4.0 * eps[:, None, None]))           # (P,N,N)
 
         if mode == "rbf":
-            return kernel_matrix, None, None, distance_matrix
+            return K, None, None, distance_matrix_out
 
-        q1 = cp.power(cp.mean(kernel_matrix, axis=2), -1)
-        kernel_matrix = cp.einsum("kij,ki,kj->kij", kernel_matrix, q1, q1)
-        q2 = cp.power(cp.mean(kernel_matrix, axis=2), -1/2)
-        kernel_matrix = cp.einsum("kij,ki,kj->kij", kernel_matrix, q2, q2)
+        q1 = cp.power(cp.mean(K, axis=2), -1)                       # (P,N)
+        K = cp.einsum("pij,pi,pj->pij", K, q1, q1)
 
-        return kernel_matrix, q1, q2, distance_matrix
+        q2 = cp.power(cp.mean(K, axis=2), -1 / 2)                   # (P,N)
+        K = cp.einsum("pij,pi,pj->pij", K, q2, q2)
 
-
-
-
-
+        return K, q1, q2, distance_matrix_out

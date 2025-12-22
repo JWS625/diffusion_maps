@@ -1,515 +1,313 @@
-import os
-import pickle
+'''
+@package manifold.py
+
+Manager of data on manifold.
+
+@author Dr. Daning Huang
+@date 06/15/2024
+'''
+
 import numpy as np
-import scipy.linalg as spl
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.optimize import minimize_scalar
+import scipy.spatial as sps
+from sklearn.preprocessing import PolynomialFeatures
 
+class Manifold:
+    def __init__(self, data, K=None, d=None, g=None, T=None, iforit=False, extT=None, verbose=True):
+        self._data = np.array(data)
+        self._Ndat, self._Ndim = self._data.shape
+        self.verbose = verbose
 
-# DMD helpers
-def _svd_truncate(S, energy_threshold=None, r=None):
-    """
-    Decide truncation rank from singular values S.
-    Priority: explicit r, then energy_threshold, else full.
-    """
-    if r is not None:
-        return int(r)
-    if energy_threshold is not None:
-        s2 = S**2
-        cum = np.cumsum(s2) / np.sum(s2)
-        return int(np.searchsorted(cum, energy_threshold) + 1)
-    return len(S)
+        # Number of kNN points in local PCA
+        tmp = int(np.sqrt(self._Ndat))
+        self._Nknn = tmp if K is None else K
 
+        # KD tree for kNN
+        _leaf = max(20, self._Nknn)
+        self._tree = sps.KDTree(self._data, leafsize=_leaf)
 
-def _filename_candidates(H):
-    return [
-        f"omega_cube_phaseA_0.0000_phaseH_{H}.0000.pkl",
-        f"omega_cube_phaseA_0.0000_phaseH_{float(H):.4f}.0000.pkl",
-    ]
+        # Intrinsic dimension
+        self._Nman = d  # If None it will be estimated later
 
+        # Order of GMLS
+        self._Nlsq = 2 if g is None else g
+        self._fphi = PolynomialFeatures(self._Nlsq, include_bias=False)
+        self._fpsi = PolynomialFeatures(self._Nlsq, include_bias=True) # General GMLS
 
-def _find_file(basepath, H):
-    for name in _filename_candidates(H):
-        p = os.path.join(basepath, name)
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError(f"Could not find file for H={H} under {basepath}")
-
-
-def _load_raw_sequence(H, basepath, N, N_trun, ds=1, dtype=np.float64):
-    """
-    Load one realization, return dat with shape (N_used, m) WITHOUT demeaning.
-    """
-    fn = _find_file(basepath, H)
-    with open(fn, "rb") as fh:
-        vort = pickle.load(fh)["omega"]
-    vort = vort[N_trun:]                            # time truncate
-    vort = vort.reshape(len(vort), -1).astype(dtype, copy=False)  # (T, m)
-    if ds is None or ds < 1:
-        ds = 1
-    vort = vort[::ds, :]
-    N_used = vort.shape[0] if (N is None) else min(N, vort.shape[0])
-    if N_used < 2:
-        raise ValueError(f"Need at least 2 snapshots after truncation; got {N_used} for H={H}")
-    return vort[:N_used, :]
-
-
-def _exact_dmd(X, Y, r=None, energy_threshold=None, dt=None):
-    """
-    Exact DMD on X,Y with Y ≈ A X.
-    X, Y : (m, T).
-
-    Returns:
-      lam, Phi, b0, omega, U_r, S_r, V_r
-    """
-    U, S, Vh = np.linalg.svd(X, full_matrices=False)  # U (m,T), S (T,), Vh (T,T)
-    r_eff = _svd_truncate(S, energy_threshold=energy_threshold, r=r)
-    U_r = U[:, :r_eff]                    # (m, r)
-    S_r = S[:r_eff]                       # (r,)
-    V_r = Vh.conj().T[:, :r_eff]          # (T, r)
-
-    # Reduced operator Ã
-    Atilde = U_r.conj().T @ Y @ V_r @ np.diag(1.0 / S_r)   # (r, r)
-    lam, W = np.linalg.eig(Atilde)                         # eigenvalues, right eigvecs in reduced space
-
-    # Full DMD modes
-    Phi = (Y @ V_r) @ np.diag(1.0 / S_r) @ W               # (m, r)
-
-    # default amplitude from first snapshot
-    b0, *_ = np.linalg.lstsq(Phi, X[:, 0], rcond=None)
-
-    omega = None if (dt is None or dt <= 0) else np.log(lam) / dt
-    return lam, Phi, b0, omega, U_r, S_r, V_r
-
-
-def _dmd_reconstruct(Phi, lam, b, timesteps):
-    """
-    Reconstruct snapshots from DMD modes.
-    Phi: (m,r), lam:(r,), b:(r,), timesteps: 1D array of ints.
-    Returns (m,K) complex.
-    """
-    k = np.asarray(timesteps)
-    Vand = lam[:, None] ** k[None, :]    # (r,K)
-    return Phi @ (b[:, None] * Vand)
-
-
-def _welford_update(mean, count, x):
-    """
-    Streaming mean update for a batch x: (k, m).
-    """
-    k = x.shape[0]
-    if k == 0:
-        return mean, count
-    batch_mean = x.mean(axis=0)
-    delta = batch_mean - mean
-    new_count = count + k
-    mean = mean + delta * (k / new_count)
-    return mean, new_count
-
-
-class ResDMD:
-    """
-    Exact DMD on multiple realizations + ResDMD residuals in reduced SVD space.
-
-    Workflow:
-      1) fit(...)      -> build global mean, stack X,Y, compute SVD & DMD eigensystem
-      2) compute_residuals_sako()    -> one residual per eigenpair (r-dimensional)
-      3) validate_residual_order_external(...)   -> pick best truncation order externally
-      4) filter_by_residual(order=...)           -> activate chosen subset of modes
-      5) evaluate(H_test, N_test) / reconstruct_sequence(...)
-    """
-    def __init__(self, basepath, N_trun=300, dt=None, ds=1,
-                 r=None, energy_threshold=None, dtype=np.float64):
-        self.basepath = basepath
-        self.N_trun   = N_trun
-        self.dt       = dt
-        self.ds       = ds
-        self.r        = r
-        self.energy_threshold = energy_threshold
-        self.dtype    = dtype
-
-        # Learned after fit
-        self.mean_vec_ = None      # (m,)
-        self.Phi_      = None      # active DMD modes (m, r_active)
-        self.lam_      = None      # active eigenvalues (r_active,)
-        self.omega_    = None
-        self.rank_     = None      # r_active
-        self.m_        = None      # original dimension
-
-        # Low-rank factors & training Y (for reduced ResDMD)
-        self._U_r = None           # (m, r)
-        self._S_r = None           # (r,)
-        self._V_r = None           # (T_total, r)
-        self._Y_tr = None          # (m, T_total)
-
-        # Full (unfiltered) eigensystem + residuals
-        self.Phi_full_   = None    # (m, r)
-        self.lam_full_   = None    # (r,)
-        self.omega_full_ = None    # (r,)
-        self.residuals_  = None    # (r,)
-
-    # Fit on training realizations
-    def fit(self, H_sets_train, N_train):
-        """
-        Fit Exact DMD on all training realizations.
-
-        H_sets_train : list of angles (or identifiers)
-        N_train      : number of time steps per realization (after N_trun)
-        """
-        # 1) Global mean via Welford
-        mean_vec = None
-        count = 0
-        raw_cache = {}
-
-        for H in H_sets_train:
-            dat = _load_raw_sequence(H, self.basepath, N_train, self.N_trun,
-                                     self.ds, dtype=self.dtype)
-            raw_cache[H] = dat                         # (N_train, m)
-            if mean_vec is None:
-                mean_vec = np.zeros(dat.shape[1], dtype=self.dtype)
-            mean_vec, count = _welford_update(mean_vec, count, dat)
-
-        if count == 0:
-            raise RuntimeError("No training frames found.")
-
-        self.mean_vec_ = mean_vec
-        self.m_ = mean_vec.size
-
-        # 2) Build global X,Y (centered by training mean)
-        X_list, Y_list = [], []
-        for H in H_sets_train:
-            dat_dm = raw_cache[H] - self.mean_vec_[None, :]
-            X_list.append(dat_dm[:-1].T.astype(self.dtype, copy=False))  # (m, N-1)
-            Y_list.append(dat_dm[ 1:].T.astype(self.dtype, copy=False))  # (m, N-1)
-        X_tr = np.concatenate(X_list, axis=1)  # (m, T_total)
-        Y_tr = np.concatenate(Y_list, axis=1)  # (m, T_total)
-        self._Y_tr = Y_tr
-
-        # 3) Exact DMD
-        lam, Phi, _, omega, U_r, S_r, V_r = _exact_dmd(
-            X_tr, Y_tr, r=self.r,
-            energy_threshold=self.energy_threshold,
-            dt=self.dt
-        )
-
-        # Cache factors
-        self._U_r = U_r
-        self._S_r = S_r
-        self._V_r = V_r
-
-        # Full eigensystem
-        self.Phi_full_   = Phi.astype(np.complex128, copy=False)
-        self.lam_full_   = lam.astype(np.complex128, copy=False)
-        self.omega_full_ = None if omega is None else omega.astype(np.complex128, copy=False)
-
-        # Active = full initially
-        self.Phi_   = self.Phi_full_.copy()
-        self.lam_   = self.lam_full_.copy()
-        self.omega_ = None if self.omega_full_ is None else self.omega_full_.copy()
-        self.rank_  = self.Phi_.shape[1]
-
-        return self
-
-    # Reduced ResDMD / Spectral analysis
-    def _build_Psi_reduced(self):
-        """
-        Build reduced (T x r) Psi0, Psi1 using SVD coordinates.
-        Uses:
-          X_tr ≈ U_r Σ_r V_r^H
-          Z0 = U_r^* X_tr = Σ_r V_r^H
-          Z1 = U_r^* Y_tr
-        Returns:
-          Psi0_r, Psi1_r : (T, r)
-        """
-        if self._U_r is None or self._S_r is None or self._V_r is None or self._Y_tr is None:
-            raise RuntimeError("fit() must be called before computing residuals.")
-
-        Vh_r = self._V_r.conj().T        # (r, T_total)
-        Z0   = np.diag(self._S_r) @ Vh_r # (r, T_total)
-        Z1   = self._U_r.conj().T @ self._Y_tr  # (r, T_total)
-
-        Psi0_r = Z0.T   # (T_total, r)
-        Psi1_r = Z1.T   # (T_total, r)
-        return Psi0_r, Psi1_r
-
-    def compute_residuals_sako(self, W=None, eps=1e-12, B=None):
-        """
-        ResDMD/SAKO residuals in the reduced DMD subspace (dimension r).
-
-        Steps:
-          - Build reduced Psi0_r, Psi1_r (T x r).
-          - Build r x r inner-product matrices M00,M01,M10,M11.
-          - Hermitianize M0,M1.
-          - Solve generalized EVP (M1,M0) with left/right eigenvectors.
-          - Biorthogonal scaling: vl^H vr ≈ I (or under metric B).
-          - SAKO residual per eigenpair:
-              r_i = sqrt( (g_i^H G(λ_i) g_i) / (g_i^H M00 g_i) ),
-            where g_i is the scaled right generalized eigenvector.
-          - Align residuals to lam_full_ (eigenvalues of Ã).
-
-        Sets:
-          self.residuals_ : shape (r,)
-        Returns:
-          residuals_, order (indices sorted by increasing residual)
-        """
-        if self.Phi_full_ is None or self.lam_full_ is None:
-            raise RuntimeError("Model not fitted.")
-
-        # 1) Reduced Psi matrices
-        Psi0, Psi1 = self._build_Psi_reduced()         # (T, r)
-        T, r = Psi0.shape
-
-        # 2) Time weights
-        if W is None:
-            W = np.ones(T, dtype=np.float64)
-        W = W.reshape(-1)
-
-        # 3) Inner products in reduced space (r x r)
-        def _M(Pi, Pj):
-            # Pi,Pj: (T,r) -> (r,r)
-            return (Pi.conj().T * W) @ Pj
-
-        M00 = _M(Psi0, Psi0)
-        M01 = _M(Psi0, Psi1)
-        M10 = _M(Psi1, Psi0)
-        M11 = _M(Psi1, Psi1)
-
-        # Hermitianized pencil
-        M0 = 0.5 * (M00 + M00.conj().T)
-        M1 = 0.5 * (M01 + M10.conj().T)
-
-        # 4) Generalized eigendecomposition (r x r)
-        wd, vl, vr = spl.eig(M1, M0, left=True, right=True)
-
-        # 5) Biorthogonal scaling: vl^H vr ≈ I (or with metric B)
-        if B is None:
-            S   = vl.conj().T @ vr
+        # Order of tangent space estimation
+        self._Ntan = 0 if T is None else T
+        if self._Ntan > 0:
+            self._ftau = PolynomialFeatures(self._Ntan, include_bias=False)
+            self._estimate_tangent = self._estimate_tangent_ho
         else:
-            S = vl.conj().T @ (B @ vr)
+            self._estimate_tangent = self._estimate_tangent_1
 
-        scl = np.diag(S).copy()
-        scl[np.isclose(scl, 0)] = eps
-        sr  = np.sqrt(scl)
-        sl  = sr.conj()
+        # Orientation of tangent vectors
+        self._iforit = iforit
 
-        vr = vr / sr.reshape(1, -1)
-        vl = vl / sl.reshape(1, -1)
-
-        # 6) G(λ) and residuals
-        def _G_of(lam):
-            G = M11 - lam * M10 - lam.conjugate() * M01 + (abs(lam) ** 2) * M00
-            return 0.5 * (G + G.conj().T)
-
-        res_eval = np.empty_like(wd.real)
-        denom = np.sum((vr.conj().T @ M00) * vr.T, axis=1).real  # g^H M00 g
-        denom = np.maximum(denom, eps)
-
-        for i, lam in enumerate(wd):
-            Gi = _G_of(lam)
-            num = np.vdot(vr[:, i], Gi @ vr[:, i]).real
-            res_eval[i] = np.sqrt(max(num, 0.0) / denom[i])
-
-        lam_eval = wd
-
-        # 7) Align to model eigenvalues (from Ã)
-        lam_model = self.lam_full_
-        res_aligned = np.empty(lam_model.size, dtype=np.float64)
-        for j, lm in enumerate(lam_model):
-            k = int(np.argmin(np.abs(lam_eval - lm)))
-            res_aligned[j] = res_eval[k]
-
-        self.residuals_ = res_aligned
-        order = np.argsort(self.residuals_)
-        return self.residuals_, order
-
-    # Residual filtering
-    def filter_by_residual(self, order='full', keep_conjugates=True, conj_tol=1e-8):
-        """
-        Trim modes by residual (self.residuals_ must exist).
-
-        order:
-          'full'  -> keep all modes
-          int k   -> keep k modes with smallest residuals
-          float τ -> keep all modes with residual <= τ
-
-        keep_conjugates:
-          If True, attempt to keep complex-conjugate pairs together.
-        """
-        if self.residuals_ is None:
-            raise RuntimeError("Call compute_residuals_sako() first.")
-
-        res = self.residuals_
-        lam = self.lam_full_
-        Phi = self.Phi_full_
-        omg = self.omega_full_
-
-        # base selection
-        if order == 'full':
-            idx = np.arange(lam.size)
-        elif isinstance(order, int):
-            idx = np.argsort(res)[:max(1, order)]
-        elif isinstance(order, float):
-            idx = np.where(res <= order)[0]
-            if idx.size == 0:
-                idx = np.array([np.argmin(res)])
+        if extT is None:
+            self._ifprecomp = False  # Not precomputed yet
         else:
-            raise ValueError("order must be 'full', int (k), or float (threshold).")
+            self._ifprecomp = True
+            self._T = np.array(extT)
 
-        # enforce conjugate pairs
-        if keep_conjugates and idx.size > 0:
-            chosen = set(idx.tolist())
-            for i in idx.tolist():
-                lam_i_conj = np.conj(lam[i])
-                j = int(np.argmin(np.abs(lam - lam_i_conj)))
-                if np.abs(lam[j] - lam_i_conj) <= conj_tol:
-                    chosen.add(j)
-            idx = np.array(sorted(chosen), dtype=int)
+        if self.verbose:
+            print(
+                f"Manifold info:\n" \
+                f"    No. of data points: {self._Ndat}\n" \
+                f"    No. of ambient dim: {self._Ndim}")
 
-        # update active eigensystem
-        self.Phi_   = Phi[:, idx]
-        self.lam_   = lam[idx]
-        self.omega_ = None if omg is None else omg[idx]
-        self.rank_  = self.Phi_.shape[1]
-        return idx, res[idx]
-
-    # Rollout and evaluation
-    def amplitudes(self, x0):
+    def estimate_intrinsic_dim(self, mode='rbf', bracket=[-20, 5], tol=0.2, ifplt=False, ifest=False, ifeps=False):
         """
-        Compute DMD amplitudes for a de-meaned initial state x0 (m,).
+        Based on
+            https://doi.org/10.1016/j.acha.2015.01.001
+        See Fig. 6
+        In implementation, we analytically evaluate
+            d(log(S(e)))/d(log(e))
         """
-        if self.Phi_ is None:
-            raise RuntimeError("Model not fitted.")
-        b, *_ = np.linalg.lstsq(self.Phi_, x0.astype(self.dtype), rcond=None)
-        return b.astype(np.complex128, copy=False)
-
-    def reconstruct_sequence(self, H, N, add_back_mean=False):
-        """
-        Load realization H (N frames), subtract TRAINING mean, and roll out from first snapshot.
-
-        Returns dict with keys:
-          'X_demeaned_truth', 'Xrec', 'b', 'relative_error', 'rmse', 'H', 'K'
-        """
-        if self.mean_vec_ is None:
-            raise RuntimeError("Model not fitted.")
-
-        dat = _load_raw_sequence(H, self.basepath, N, self.N_trun,
-                                 self.ds, dtype=self.dtype)   # (N, m)
+        # Normalized squared distances
+        dst = sps.distance.pdist(self._data)**2
+        dmx = np.max(dst)
+        dst /= dmx
+        # Tuning functions
+        def S(e):
+            tmp = np.sum(np.exp(- dst / e))*2 + self._Ndat
+            return tmp / self._Ndat**2
+        def dS(e):
+            _k = np.exp(- dst / e)
+            _S = 2 * np.sum(_k) + self._Ndat
+            _d = 2 * dst.dot(_k)
+            return _d/_S/e
+        # Find the intrinsic dimension as the max of slope
+        func = lambda e: -2*dS(2.**e)
+        res = minimize_scalar(func, bracket=bracket)
+        est = -func(res.x)
+        # For fractional dimensions, we do a biased rounding
+        if np.ceil(est)-est <= tol:
+            dim = int(np.ceil(est))
+        else:
+            dim = int(np.floor(est))
         
-        t_window = self.dt * np.arange(len(dat))
-        weights = np.exp(t_window-t_window[-1])
+        bmp = (2**res.x * dmx)
+        tmp = bmp**(1/est)
 
-        X_truth = dat - self.mean_vec_[None, :] #(N, m)
-        x0 = X_truth[0]
+        if self.verbose:
+            print(f"    Estimated intrinsic dim: {dim}/{est}")
+            print(f"2**res.x * dmx = {2**res.x * dmx}")
+            print(f"    Reference bandwidth {tmp}; ref L2 dist {dmx}; ref scalar {2**res.x}")
 
-        N = X_truth.shape[0]
-        m = X_truth.shape[1]
-
-        b_te, *_ = np.linalg.lstsq(self.Phi_, x0, rcond=None)
-        Xrec = _dmd_reconstruct(self.Phi_, self.lam_, b_te, np.arange(N)).real.T  # (N, m)
-        _err = X_truth - Xrec   # (N, m)
-
-        rel_err = np.linalg.norm(weights[:, None]*_err) / np.linalg.norm(X_truth)
-        rmse    = np.sqrt(np.mean((X_truth - Xrec) ** 2))
-
-        if add_back_mean:
-            Xrec_out = Xrec + self.mean_vec_[:, None]
+        if ifest:
+            sol = (dim, est, bmp, tmp)
         else:
-            Xrec_out = Xrec
+            sol = dim
 
-        return {
-            "H": H,
-            "ambient_dimension": m,
-            "X_demeaned_truth": X_truth,
-            "Xrec": Xrec_out,
-            "b": b_te,
-            "relative_error": float(rel_err),
-            "rmse": float(rmse),
-        }
+        # Plotting for sanity check
+        if ifplt:
+            if isinstance(ifplt, bool):
+                eps = 2.**np.arange(*bracket)
+            else:
+                eps = 2.**np.linspace(bracket[0], bracket[1], ifplt)
+            val = [S(_e) for _e in eps]
+            slp = [2*dS(_e) for _e in eps]
 
-    def evaluate(self, H, N):
-        """
-        Convenience: return (relative_error, rmse) on de-meaned space for (H,N).
-        """
-        res = self.reconstruct_sequence(H, N, add_back_mean=False)
-        return res["relative_error"], res["rmse"]
+            f, ax = plt.subplots(nrows=2, sharex=True)
+            ax[0].loglog(eps, val)
+            ax[1].semilogx(eps, slp)
+            ax[1].semilogx(2**res.x, est, 'bo', markerfacecolor='none', \
+                label=f"Estimated dim: {est:4.3f}")
+            ax[0].set_ylabel('$S(\epsilon)$')
+            ax[1].set_xlabel('$\epsilon$')
+            ax[1].set_ylabel('$d$')
+            ax[1].legend()
 
+            if ifeps:
+                return sol, tmp, (f, ax)
+            else:
+                return sol, (f, ax)
 
-# External validation of residual truncation order
-def _snapshot_spectrum(model: ResDMD):
-    return {
-        "Phi_":   model.Phi_.copy(),
-        "lam_":   model.lam_.copy(),
-        "omega_": None if model.omega_ is None else model.omega_.copy(),
-        "rank_":  model.rank_,
-    }
+        if ifeps:
+            return sol, 2**res.x
+        else:
+            return sol
 
+    def visualize_intrinsic_dim(self, K=None, ifref=True, ifnrm=True):
+        _K = self._Nknn if K is None else K
+        # Local PCA
+        svs = []
+        for _x in self._data:
+            _, _i = self._tree.query(_x, k=_K)
+            _V = self._data[_i] - _x
+            _, _s, _ = np.linalg.svd(_V, full_matrices=False)
+            svs.append(_s)
+        _avr = np.mean(svs, axis=0)
+        _std = np.std(svs, axis=0)
+        # Global PCA, as reference
+        _tmp = self._data - np.mean(self._data, axis=0)
+        _, sv, _ = np.linalg.svd(_tmp, full_matrices=False)
 
-def _restore_spectrum(model: ResDMD, snap):
-    model.Phi_   = snap["Phi_"]
-    model.lam_   = snap["lam_"]
-    model.omega_ = snap["omega_"]
-    model.rank_  = snap["rank_"]
+        scl = np.max(_avr) if ifnrm else 1.0
+        ds = np.arange(len(_avr))+1
+        f = plt.figure()
+        plt.plot(ds, _avr/scl)
+        plt.fill_between(ds, (_avr+_std)/scl, (_avr-_std)/scl, alpha=0.4)
+        if ifref:
+            scl = np.max(sv) if ifnrm else 1.0
+            plt.plot(np.arange(len(sv))+1, sv/scl, 'r--')
+        plt.xlabel("SV Index")
+        if ifnrm:
+            plt.ylabel("Normalized SV")
+        else:
+            plt.ylabel("SV")
 
+        return _avr, _std, f
 
-def validate_residual_order_external(
-    model: ResDMD,
-    H_valid,
-    N_valid,
-    orders,
-    *,
-    keep_conjugates=True,
-    metric="rmse",       # 'rmse' or 'rel'
-    aggregate="mean",    # 'mean' | 'median' | 'max'
-    apply_best=True,
-):
-    """
-    Sweep over 'orders' (e.g., ['full', 10, 20, 50, 1e-3]) and pick the best
-    residual truncation order using validation trajectories.
+    def precompute(self):
+        print("  Precomputing")
+        if self._ifprecomp:
+            assert self._T.shape == (self._Ndat, self._Nman, self._Ndim)
+            print("  Already done, or T supplied externally; skipping")
+            return
 
-    NOTE:
-      - We assume model.fit(...) and model.compute_residuals_sako() have already been called.
-      - We NEVER change the rank r of the reduced Ã; we only pick subsets of eigenpairs.
+        if self._Nman is None:
+            self._Nman = self.estimate_intrinsic_dim()
+        else:
+            print(f"    Using intrinsic dimension: {self._Nman}")
+        self._T = []
+        for _d in self._data:
+            self._T.append(self._estimate_tangent(_d))
+        if self._iforit:
+            print("  Orienting tangent vectors")
+            if self._Nman == 1:
+                rems = list(range(1,self._Ndat))
+                curr = 0
+                while len(rems) > 0:
+                    _, _i = self._tree.query(self._data[curr], k=self._Nknn)
+                    _T = self._T[curr]
+                    for _j in _i:
+                        if _j in rems:
+                            _d = self._T[_j].dot(_T.T)
+                            if _d < 0:
+                                self._T[_j] = -self._T[_j]
+                            rems.remove(_j)
+                            curr = _j
+            else:
+                raise NotImplementedError("Orientation for higher-dim manifold not implemented; \
+                    supply oriented T externally")
+        self._ifprecomp = True
+        print("  Done")
 
-    Returns:
-      best : dict { 'order', 'score', 'per_seq', 'kept', 'idx_kept' }
-      results : list of such dicts, one per order
-    """
-    assert metric in ("rmse", "rel")
-    assert aggregate in ("mean", "median", "max")
+    def gmls(self, x, Y):
+        _, _i = self._tree.query(x, k=self._Nknn)
+        _T, _V = self._estimate_tangent(x, ret_V=True)
+        _B = _V.dot(_T.T)
+        _P = self._fpsi.fit_transform(_B)
+        _C = np.linalg.pinv(_P).dot(Y[_i])
+        _r = self._fpsi.fit_transform(np.zeros((1,self._Nman))).dot(_C)
+        return _r
 
-    if model.residuals_ is None:
-        model.compute_residuals_sako()
+    def _estimate_normal(self, base, x):
+        _T, _V = self._estimate_tangent(base, ret_V=True)
+        _B = _V.dot(_T.T)
+        _P = self._fphi.fit_transform(_B)
+        _b = np.atleast_2d((x - base).dot(_T.T))
+        _p = self._fphi.fit_transform(_b)
+        _n = _p.dot(np.linalg.pinv(_P)).dot(_V - _B.dot(_T))
+        return _n.squeeze()
 
-    snap0 = _snapshot_spectrum(model)
-    agg_fn = {"mean": np.mean, "median": np.median, "max": np.max}[aggregate]
+    def _estimate_tangent_1(self, x, ret_V=False):
+        _d, _i = self._tree.query(x, k=self._Nknn)
+        _V = self._data[_i] - x
+        _, _, _Vh = np.linalg.svd(_V, full_matrices=False)
+        _T = _Vh.conj()[:self._Nman]
+        if ret_V:
+            return _T, _V
+        return _T
 
-    results = []
-    for ord_val in orders:
-        # select subset of eigenpairs by residual
-        idx_kept, _ = model.filter_by_residual(order=ord_val,
-                                               keep_conjugates=keep_conjugates)
+    def _estimate_tangent_ho(self, x, ret_V=False):
+        _T, _V = self._estimate_tangent_1(x, ret_V=True)
+        _B = _V.dot(_T.T)
+        _P = self._ftau.fit_transform(_B)
+        _C = np.linalg.pinv(_P).dot(_V - _B.dot(_T))
+        _T += _C[:self._Nman]
+        _T = np.linalg.qr(_T.T, mode='reduced')[0].T
+        if ret_V:
+            return _T, _V
+        return _T
 
-        per_seq = []
-        for H in H_valid:
-            rel, rmse = model.evaluate(H, N_valid)
-            per_seq.append(rmse if metric == "rmse" else rel)
-        per_seq = np.asarray(per_seq, dtype=float)
-        score = float(agg_fn(per_seq))
+    def plot2d(self, N, scl=1):
+        assert self._Ndim == 2
+        _d = self._data
 
-        results.append({
-            "order":   ord_val,
-            "score":   score,
-            "per_seq": per_seq,
-            "kept":    model.rank_,
-            "idx_kept": idx_kept,
-        })
+        f, ax = plt.subplots(nrows=1, ncols=1)
+        plt.plot(_d[:,0], _d[:,1], 'b.', markersize=1)
+        for _i in range(N):
+            _p = _d[_i] + scl*self._T[_i]
+            _c = np.vstack([_d[_i], _p]).T
+            plt.plot(_c[0], _c[1], 'k-')
+        return f, ax
 
-    # choose best
-    best = min(results, key=lambda d: d["score"])
+    def plot3d(self, N, scl=1):
+        assert self._Ndim == 3
+        _d = self._data
 
-    # leave model at best selection if desired
-    _restore_spectrum(model, snap0)
-    if apply_best:
-        model.filter_by_residual(order=best["order"],
-                                 keep_conjugates=keep_conjugates)
+        f = plt.figure()
+        ax = f.add_subplot(projection='3d')
+        ax.plot(_d[:,0], _d[:,1], _d[:,2], 'b.', markersize=1)
+        for _i in range(N):
+            _p = _d[_i] + scl*self._T[_i]
+            for _j in range(2):
+                _c = np.vstack([_d[_i], _p[_j]]).T
+                ax.plot(_c[0], _c[1], _c[2], 'k-')
+        return f, ax
 
-    return best, results
+class ManifoldAnalytical(Manifold):
+    def __init__(self, data, K=None, d=None, g=None, fT=None):
+        self._data = np.array(data)
+        self._Ndat, self._Ndim = self._data.shape
 
+        # Number of kNN points in local PCA
+        tmp = int(np.sqrt(self._Ndat))
+        self._Nknn = tmp if K is None else K
+
+        # KD tree for kNN
+        _leaf = max(20, self._Nknn)
+        self._tree = sps.KDTree(self._data, leafsize=_leaf)
+
+        # Intrinsic dimension
+        assert d is not None
+        self._Nman = d
+
+        # Order of GMLS
+        self._Nlsq = 2 if g is None else g
+        self._fphi = PolynomialFeatures(self._Nlsq, include_bias=False)
+        self._fpsi = PolynomialFeatures(self._Nlsq, include_bias=True) # General GMLS
+
+        # Order of tangent space estimation
+        self._tangent_func = fT
+
+        # Possible data members
+        self._T = []   # Tangent space basis for every data point
+        self._ifprecomp = False  # Not precomputed yet
+
+        print(
+            f"Manifold info:\n" \
+            f"    No. of data points: {self._Ndat}\n" \
+            f"    No. of ambient dim: {self._Ndim}")
+
+    def precompute(self):
+        print("  Precomputing")
+        self._T = []
+        for _d in self._data:
+            self._T.append(self._estimate_tangent(_d))
+        self._ifprecomp = True
+        print("  Done")
+
+    def _estimate_tangent(self, x, ret_V=False):
+        _T = self._tangent_func(x)
+        if ret_V:
+            _, _i = self._tree.query(x, k=self._Nknn)
+            _V = self._data[_i] - x
+            return _T, _V
+        return _T

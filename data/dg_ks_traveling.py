@@ -96,17 +96,20 @@ ts = jnp.arange(NT + SKP) * DT
 ts = ts[SKP::TS]
 
 if ifplt:
-    plt.figure(figsize=(20, 5))
-    plt.imshow(
+    f = plt.figure(figsize=(20, 5))
+    ax = f.add_subplot()
+    ax.imshow(
         trj.T,
         cmap="RdBu",
         aspect="auto",
         origin="lower",
         extent=(ts[0], ts[-1], 0, DOMAIN_SIZE),
     )
-    plt.colorbar()
-    plt.xlabel("time")
-    plt.ylabel("space")
+    f.colorbar()
+    ax.set_xlabel("time")
+    ax.set_ylabel("space")
+
+
 
 if ifsav:
     print(f"udata.shape = {np.array(trj).shape}")
@@ -117,6 +120,6 @@ if ifsav:
         "nu": NU,
         "dt": DT * TS,
     }
-    pickle.dump(dat, open(f"./../../../ks_utils/ksdata_traveling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "wb"))
+    pickle.dump(dat, open(f"cached_data/ksdata_traveling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "wb"))
 
 plt.show()

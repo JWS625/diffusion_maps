@@ -1,11 +1,11 @@
-import os
-
-# set wkdir to dm_final
-# os.chdir("dm_final")
+import sys
+from pathlib import Path
+REPO_ROOT = Path.cwd().resolve().parents[1]  # if CWD is diffusion_maps/test
+sys.path.insert(0, str(REPO_ROOT))
 
 import itertools
 import pickle
-import krr_model
+from src import krr_model
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -13,10 +13,11 @@ import cupy as cp
 import polars as pl
 from tqdm import tqdm
 
-from gindy.src.manifold import Manifold
-from dm_main import DMClass
+from src.utils import Manifold
+from src.dm_main import DMClass
 
-from matplotlib import pyplot as plt
+
+
 np.random.seed(42)
 cp.random.seed(42)
 
@@ -69,95 +70,7 @@ def main(mode):
         }
     )
     pldf.write_parquet(
-        f"./numerical_results/{title}_cv_{mode}_{map_type}.parquet"
-    )
-
-    free_gpu_memory()
-
-def test(mode):
-
-    cv_results = pl.read_parquet(
-        f"./numerical_results/{title}_cv_{mode}_{map_type}.parquet"
-    )
-    cv_rmse = cv_results["rmse"].to_numpy()
-    eps = cv_results["epsilon"].to_numpy()
-    lam =  cv_results["lambda"].to_numpy()
-
-    index = np.nanargmin(cv_rmse)
-    epsilon = eps[index]
-    lambda_reg = lam[index]
-
-    opts["inp"] = data_train_x
-    opts["out"] = data_train_y
-    data_test_arr = np.asarray(data_test).squeeze()  # [steps, Nx]
-    steps = data_test_arr.shape[0]
-
-    model = krr_model.modeler(**opts)
-    model.fit_model(epsilon, lambda_reg, mode)
-
-    _truePath     = cp.array(data_test_arr) #[steps, trials, Nx]
-    truePath = _truePath
-
-    test_point = cp.asarray(truePath[0])
-    pred_path = [cp.array(test_point).get()]
-    # mean_cp = cp.asarray(mean)
-    # std_cp = cp.asarray(std)
-
-    for i in tqdm(range(steps - 1)):
-        test_point = model.forecast(test_point)
-        # test_point = std_cp * test_point + mean_cp
-        pred_path.append(test_point.get())
-
-    pred_path = cp.array(pred_path) #@ Q_cp.T  # [steps, trials, Nx]
-    print(f"pred_path.shape = {pred_path.shape}")
-    print(f"_truePath.shape = {_truePath.shape}")
-    nrmse = cp.linalg.norm(pred_path - _truePath) / cp.linalg.norm(_truePath)
-    nrmse = cp.asnumpy(nrmse)
-    
-    t_plot = dt * np.arange(N_test)
-    plot_modes = 10
-    fig, ax = plt.subplots(nrows=plot_modes//2 + plot_modes%2, ncols=2, sharex=True, sharey=True)
-    for _ in range(plot_modes):
-        row = _ // 2
-        col = _ % 2
-        l1, = ax[row, col].plot(t_plot, _truePath[:, _].get())
-        l2, = ax[row, col].plot(t_plot, pred_path[:, _].get())
-        ax[row, col].grid()
-    ax[0, 1].legend([l1, l2], ["Truth", "Pred"])
-    ax[-1, 0].set_xlabel('$t$'); ax[-1, 1].set_xlabel('$t$')
-    plt.suptitle(f"NRMSE = {nrmse}")
-    # fig.savefig(f'./journal_pics/ppplate_pred_{mode}_{map_type}_weights.png')
-
-    fig, ax = plt.subplots(nrows=plot_modes//2 + plot_modes%2, ncols=2, sharex=True, sharey=True)
-    for _ in range(plot_modes):
-        row = _ // 2
-        col = _ % 2
-        l1, = ax[row, col].plot(t_plot, _truePath[:, r-1-_].get())
-        l2, = ax[row, col].plot(t_plot, pred_path[:, r-1-_].get())
-        ax[row, col].grid()
-    ax[0, 1].legend([l1, l2], ["Truth", "Pred"])
-    ax[-1, 0].set_xlabel('$t$'); ax[-1, 1].set_xlabel('$t$')
-    plt.suptitle(f"NRMSE = {nrmse}")
-    # fig.savefig(f'./journal_pics/ppplate_pred_last10_{mode}_{map_type}_weights.png')
-
-
-    print(
-        f"Test max RMSE: {np.nanmax(nrmse)}, Val RMSE: {cv_rmse[index]}, "
-        f"epsilon: {epsilon}, lambda: {lambda_reg}"
-    )
-
-    results_df = pl.DataFrame(
-        {
-            "epsilon": [epsilon],
-            "lambda": [lambda_reg],
-            "rmse": [nrmse.tolist()],
-            "path": [pred_path.get().tolist()],
-            # "Q"   : [Q.tolist()],
-        }
-    )
-
-    results_df.write_parquet(
-        f"./numerical_results/{title}_{mode}_{map_type}.parquet"
+        f"./numerical_results/{title}_cv_{mode}_{map_type}_2.parquet"
     )
 
     free_gpu_memory()
@@ -226,8 +139,11 @@ def compute_rmse_inner_cv(
         weights = np.exp(t_window-t_window[-1])
         weights = weights / np.linalg.norm(weights)
 
-        model = krr_model.modeler(**opts)
-        model.fit_model(epsilon, lambda_reg, mode)
+        model = krr_model.Modeler(**opts)
+        distance_matrix = cp.linalg.norm(
+                cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
+            )
+        model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
 
         _data_val_cp = cp.asarray(data_val)
         data_val_cp  = _data_val_cp
@@ -275,7 +191,7 @@ def optimalSig(s, thr=0.99):
 if __name__ == "__main__":
 
     dt = 0.1
-    map_type_lst = ["direct"]#, "skip-connection"]
+    map_type_lst = ["direct"]
     mode_lst = ["diffusion", "rbf"]
     cv_trials = 8192
     title = "ppplate"
@@ -351,7 +267,7 @@ if __name__ == "__main__":
     # test data
     test_dat_lst = []
     for _i, _h in enumerate(test_sets):
-        filename = f'./cached_data/omega_cube_phaseA_0.0000_phaseH_{_h}.0000.pkl'
+        filename = f'./cached_data/omega_cube_phaseA_0_phaseH_{_h}.pkl'
         with open(filename, 'rb') as pickle_file:
             vort = pickle.load(pickle_file)['omega'][N_trun:]
 
@@ -399,4 +315,3 @@ if __name__ == "__main__":
 
             print(mode)
             main(mode)
-            test(mode)

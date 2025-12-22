@@ -114,8 +114,8 @@ for _ in range(4):
         _x_re2, _y_re2 = _x_re2[_ind_re2], _y_re2[_ind_re2]
         _x_re3, _y_re3 = _x_re3[_ind_re3], _y_re3[_ind_re3]
 
-    filename_training_x = (f"cached_data/torus_training_data_x_{_N}_{d}_dt_{dt}.npy")  
-    filename_training_y = (f"cached_data/torus_training_data_y_{_N}_{d}_dt_{dt}.npy")   
+    filename_training_x = (f"cached_data/torus_training_data_x_{_N}_{d}.npy")  
+    filename_training_y = (f"cached_data/torus_training_data_y_{_N}_{d}.npy")   
 
     data_x_training = np.concatenate([_x_re1, _x_re2, _x_re3], axis=0)
     data_y_training = np.concatenate([_y_re1, _y_re2, _y_re3], axis=0)
@@ -169,14 +169,14 @@ for _ in range(4):
 #    np.save(filename_training_y_8192, data_y_training)
 
 # validation set
-data_x_validation = np.concatenate(x_vl_ds_lst, axis=0)
-data_y_validation = np.concatenate(y_vl_ds_lst, axis=0)
-filename_validation_x = (f"cached_data/torus_validation_data_x_{N_validation}_{d}_dt_{dt}.npy")
-filename_validation_y = (f"cached_data/torus_validation_data_y_{N_validation}_{d}_dt_{dt}.npy")
+# data_x_validation = np.concatenate(x_vl_ds_lst, axis=0)
+# data_y_validation = np.concatenate(y_vl_ds_lst, axis=0)
+# filename_validation_x = (f"cached_data/torus_validation_data_x_{N_validation}_{d}_dt_{dt}.npy")
+# filename_validation_y = (f"cached_data/torus_validation_data_y_{N_validation}_{d}_dt_{dt}.npy")
 
-if save_bool:
-    np.save(filename_validation_x, data_x_validation)
-    np.save(filename_validation_y, data_y_validation)
+# if save_bool:
+#     np.save(filename_validation_x, data_x_validation)
+#     np.save(filename_validation_y, data_y_validation)
 
 steps = 2000
 _x0 = np.load(f'./cached_data/sphere_test_data.npy')[:1000]
