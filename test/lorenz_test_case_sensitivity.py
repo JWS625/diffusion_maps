@@ -1,27 +1,20 @@
-import os
+from pathlib import Path
+import sys
+root = Path.cwd().resolve().parents[1]
+sys.path.insert(0, str(root))
+
+from diffusion_maps import model_dir, data_dir
 
 import cupy as cp
-import general_utils
 import numpy as np
-
-# sphere
-import sphere_torus_utils.torus_data_gen as tdg
-import sphere_torus_utils.sphere_torus_helpers as sth
-
-# lorenz
-from lorenz import generateData as lorenz_datagen
-from lorenz import f as lorenz_f
+import pickle
 
 from joblib import Parallel, delayed
-import polars as pl
-import time
 from tqdm import tqdm
 
-import pickle
-import scipy.io as sio
-
-from gindy.src.manifold import Manifold
-from dm_main import DMClass
+from src.krr_model import Modeler
+from src.dm_main import DMClass
+from src.utils import Manifold
 
 np.random.seed(12)
 cp.random.seed(12)
@@ -81,7 +74,7 @@ def batched_compute_inner_cv(
             ]
 
             opts["data"] = k_train
-            model = general_utils.modeler(**opts)
+            model = Modeler(**opts)
 
             X = cp.asarray(model.inp, dtype=cp.float64)  # (N, d)
             n = cp.sum(X * X, axis=1)                    # (N,)
@@ -104,8 +97,6 @@ def batched_compute_inner_cv(
                 lam_chunk = lambda_array[start:end]
 
                 model.fit_model(eps_chunk, lam_chunk, mode, distance_matrix=distance_matrix)
-                # if np.isnan(model.dm.beta).any():
-                #     print("Nan found")
                 _vpt_chunk, _tau_f_chunk = model.get_performance(
                     j_valid,
                     dt=dt,
@@ -157,7 +148,7 @@ def compute_cv_with_parallelization(k_train, k_valid, k_epsilon_array, k_lambda_
 def run_cv():
 
     print("Starting to find reference hyper-parameters.")
-    ref_param_file = f"./numerical_results/lorenz_3d_ref_params_{num_points}.pkl"
+    ref_param_file = model_dir + f"/l63/lorenz_3d_ref_params_{num_points}.pkl"
     epsilon_array = np.zeros((test_trials, cv_trials_per_device*devices))
     lambda_array = np.zeros((test_trials, cv_trials_per_device*devices))
     try:
@@ -179,9 +170,8 @@ def run_cv():
             lambda_array[k, :] = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials_per_device * devices))
 
     except:
-
-        print(f"No existing reference hyper-parameters. \nFinding reference....")
         # Finding reference hyperparameters
+        print(f"No existing reference hyper-parameters. \nFinding reference....")
         
         ref_epsilon = np.zeros(test_trials)
         ref_lambda = np.zeros(test_trials)
@@ -234,8 +224,6 @@ def run_cv():
             devices,
         )
 
-
-        # predictions.append(k_preds)
         cv_tau_f_array.append(k_tau_f_array)
         cv_vpt_array.append(k_vpt_array)
 
@@ -256,7 +244,7 @@ def run_cv():
                 "validation_horizon":validation_horizon,
                 }
     
-    cv_filename = f"numerical_results/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
+    cv_filename = model_dir + f"/l63/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(cv_filename, "wb") as f:
         pickle.dump(cv_results, f)
     
@@ -264,12 +252,12 @@ def run_cv():
 
 def run_test():
 
-    train = np.load("./cached_data/lorenz_train.npy").T
-    test = np.load('./cached_data/lorenz_test.npy').transpose(0, 2, 1)
+    train = np.load(data_dir + "/cached_data/lorenz_train.npy").T
+    test = np.load(data_dir + '/cached_data/lorenz_test.npy').transpose(0, 2, 1)
     n_test, T, d = test.shape
 
     # Load CV results
-    path = f"numerical_results/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
+    path = model_dir + f"/l63/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(path, "rb") as f:
         cv_results = pickle.load(f)
 
@@ -307,7 +295,7 @@ def run_test():
                 local_opts = dict(opts)
                 local_opts["data"] = i_train
 
-                model = general_utils.modeler(**local_opts)
+                model = Modeler(**local_opts)
 
                 X = cp.asarray(model.inp, dtype=cp.float64)  # (N, d)
                 n = cp.sum(X * X, axis=1)                    # (N,)
@@ -351,7 +339,6 @@ def run_test():
     for index_block, v_block, tau_block in results:
         vpts[index_block]   = v_block
         tau_fs[index_block] = tau_block
-    # print(np.sort(vpts))
 
     free_gpu_memory()
     print(f"mean VPT = {np.mean(vpts)}, min VPT = {np.min(vpts)}, max VPT = {np.max(vpts)}.")
@@ -364,12 +351,9 @@ def run_test():
 
     print(f"test mean vpt: = {np.mean(vpts)}")
 
-    outp = f"./numerical_results/lorenz_3d_test_result_{mode}_{map_type}_{num_points}_vl_{validation_length}.pkl"
+    outp = model_dir + f"/l63/lorenz_3d_test_result_{mode}_{map_type}_{num_points}_vl_{validation_length}.pkl"
     with open(outp, "wb") as f:
         pickle.dump(performance, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-
 
 if __name__ == "__main__":
 
@@ -386,7 +370,7 @@ if __name__ == "__main__":
     title = f"lorenz_3d"
 
     # Datasets 
-    train = np.load("./cached_data/lorenz_train.npy").T
+    train = np.load(data_dir + "/cached_data/lorenz_train.npy").T
     validation_size_multiplier = 2
     validation_horizon_dict = {
         '512': [200*i+500 for i in range(8)],
@@ -396,7 +380,7 @@ if __name__ == "__main__":
     
     opts = {
         "map_type": map_type,
-        "norm": False,
+        "pipeline": "batch"
     }
 
     for num_points in num_points_lst:

@@ -1,28 +1,25 @@
 import sys
 from pathlib import Path
-REPO_ROOT = Path.cwd().resolve().parents[1]  # if CWD is diffusion_maps/test
-sys.path.insert(0, str(REPO_ROOT))
+root = Path.cwd().resolve().parents[1]
+sys.path.insert(0, str(root))
 
-import itertools
+from diffusion_maps import model_dir, data_dir
+
 import pickle
-from src import krr_model
+from src.krr_model import Modeler
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed
 import cupy as cp
 import polars as pl
-from tqdm import tqdm
 
 from src.utils import Manifold
 from src.dm_main import DMClass
-
-
 
 np.random.seed(42)
 cp.random.seed(42)
 
 def _to_float(x):
-    # Handle CuPy scalars/arrays, NumPy scalars/arrays, and Python floats
     try:
         if isinstance(x, cp.ndarray):
             return float(cp.asnumpy(x))
@@ -56,7 +53,7 @@ def free_gpu_memory():
     gc.collect()
     cp.cuda.runtime.deviceSynchronize()
 
-def main(mode):
+def run_val(mode):
     epsilon_array, lambda_array, rmse_array = compute_cv_rmse_with_parallelization(
         mode, dt, data_train_x, data_train_y, data_val
     )
@@ -70,7 +67,7 @@ def main(mode):
         }
     )
     pldf.write_parquet(
-        f"./numerical_results/{title}_cv_{mode}_{map_type}_2.parquet"
+        model_dir + f"/ppplate/{title}_cv_{mode}_{map_type}.parquet"
     )
 
     free_gpu_memory()
@@ -108,7 +105,7 @@ def batched_compute_rmse_inner_cv(
     with cp.cuda.Device(device):
         rmse_lst = []
         try:
-            for epsilon, lambda_reg in tqdm(zip(epsilon_array, lambda_array)):
+            for epsilon, lambda_reg in tqdm(zip(epsilon_array, lambda_array), total=len(epsilon_array)):
 
                 rmse = compute_rmse_inner_cv(
                     mode, dt, data_train_x, data_train_y,
@@ -139,7 +136,7 @@ def compute_rmse_inner_cv(
         weights = np.exp(t_window-t_window[-1])
         weights = weights / np.linalg.norm(weights)
 
-        model = krr_model.Modeler(**opts)
+        model = Modeler(**opts)
         distance_matrix = cp.linalg.norm(
                 cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
             )
@@ -169,9 +166,65 @@ def compute_rmse_inner_cv(
         error  = path[:T] - target
 
         nrmse_scalar = cp.linalg.norm(weights_cp*error) / cp.linalg.norm(target)
+        free_gpu_memory()
 
         return _to_float(nrmse_scalar)
 
+def test(mode):
+
+    cv_results = pl.read_parquet(
+        model_dir + f"/ppplate/{title}_cv_{mode}_{map_type}.parquet"
+    )
+    cv_rmse = cv_results["rmse"].to_numpy()
+    eps = cv_results["epsilon"].to_numpy()
+    lam =  cv_results["lambda"].to_numpy()
+
+    index = np.nanargmin(cv_rmse)
+    epsilon = eps[index]
+    lambda_reg = lam[index]
+
+    opts["inp"] = data_train_x
+    opts["out"] = data_train_y
+    data_test_arr = np.asarray(data_test).squeeze()
+    steps = data_test_arr.shape[0]
+
+    model = Modeler(**opts)
+    distance_matrix = cp.linalg.norm(
+            cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
+        )
+    model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
+
+    truePath = cp.array(data_test_arr)
+    test_point = cp.asarray(truePath[0]).reshape(1, -1)
+    pred_path = [cp.array(test_point).get()]
+
+    for i in tqdm(range(steps - 1)):
+        test_point = model.forecast(test_point)
+        pred_path.append(test_point.get())
+
+    pred_path = cp.array(pred_path).squeeze()
+    nrmse = cp.linalg.norm(pred_path - truePath) / cp.linalg.norm(truePath)
+    nrmse = cp.asnumpy(nrmse)
+
+    print(
+        f"Test max RMSE: {np.nanmax(nrmse)}, Val RMSE: {cv_rmse[index]}, "
+        f"epsilon: {epsilon}, lambda: {lambda_reg}"
+    )
+
+    results_df = pl.DataFrame(
+        {
+            "epsilon": [epsilon],
+            "lambda": [lambda_reg],
+            "rmse": [nrmse.tolist()],
+            "path": [pred_path.get().tolist()],
+        }
+    )
+    free_gpu_memory()
+    
+    results_df.write_parquet(
+        model_dir + f"/ppplate/{title}_{mode}_{map_type}.parquet"
+    )
+    
 
 
 def optimalSig(s, thr=0.99):
@@ -209,10 +262,10 @@ if __name__ == "__main__":
     N_trun = 200
     t = dt*np.arange(0, N)
     training_dat_lst = []
+    print("Training data processing...")
     for _i, _h in enumerate(training_sets):
-        filename = f'./cached_data/omega_cube_phaseA_0.0000_phaseH_{_h}.0000.pkl'
-        with open(filename, 'rb') as pickle_file:
-            vort = pickle.load(pickle_file)['omega'][N_trun:]
+        filename = str(data_dir) + f'/cached_data/omega_cube_phaseA_0_phaseH_{_h}.npy'
+        vort = np.load(filename)[N_trun:]
 
         vort = vort.reshape(len(vort), -1)
         _dat = vort[:N]
@@ -227,7 +280,6 @@ if __name__ == "__main__":
     sr_norm = sr / sr[0]
 
     data_train = ur @ np.diag(sr_norm)
-
     print(f"svd order = {r}")
 
     data_train_x, data_train_y = [], []
@@ -235,18 +287,16 @@ if __name__ == "__main__":
         _d = data_train[_i*N:(_i+1)*N]
         data_train_x.append(_d[:-1])
         data_train_y.append(_d[1:])
-        # data_train_y.append((_d[1:] - mean) / std)
 
     data_train_x, data_train_y = np.vstack(data_train_x), np.vstack(data_train_y)
-    print(f"data_train_x.shape = {data_train_x.shape}")
-    print(f"data_train_y.shape = {data_train_y.shape}")
+    print("Done.")
 
     # validation
+    print("Validation data processing...")
     validation_dat_lst = []
     for _i, _h in enumerate(validation_sets):
-        filename = f'./cached_data/omega_cube_phaseA_0.0000_phaseH_{_h}.0000.pkl'
-        with open(filename, 'rb') as pickle_file:
-            vort = pickle.load(pickle_file)['omega'][N_trun:]
+        filename = str(data_dir) + f'/cached_data/omega_cube_phaseA_0_phaseH_{_h}.npy'
+        vort = np.load(filename)[N_trun:]
 
         vort = vort.reshape(len(vort), -1)
         vort = vort - vortex_mean
@@ -257,19 +307,18 @@ if __name__ == "__main__":
 
     data_val = []
     for _j in range(len(validation_sets)):
-        print(validation_dat[_j*N:(_j+1)*N].shape)
         data_val.append(validation_dat[_j*N:(_j+1)*N])
 
     data_val = np.array(data_val)
     data_val = data_val.transpose(1, 0, 2)
-    print(f"data_val.shape = {data_val.shape}")
+    print("Done.")
 
-    # test data
+    # test
+    print("Test data processing...")
     test_dat_lst = []
     for _i, _h in enumerate(test_sets):
-        filename = f'./cached_data/omega_cube_phaseA_0_phaseH_{_h}.pkl'
-        with open(filename, 'rb') as pickle_file:
-            vort = pickle.load(pickle_file)['omega'][N_trun:]
+        filename = str(data_dir) + f'/cached_data/omega_cube_phaseA_0_phaseH_{_h}.npy'
+        vort = np.load(filename)[N_trun:]
 
         vort = vort.reshape(len(vort), -1)
         vort = vort - vortex_mean
@@ -284,13 +333,12 @@ if __name__ == "__main__":
 
     data_test = np.array(data_test)
     data_test = data_test.transpose(1, 0, 2)
-    print(f"data_test.shape = {data_test.shape}")
+    print("Done.")
 
-    # kernel solver setup
     for map_type in map_type_lst:
         opts = {
             "map_type": map_type,
-            "norm": False,
+            "pipeline": "single"
         }
         _man_data = data_train_x
         man = Manifold(_man_data)
@@ -314,4 +362,5 @@ if __name__ == "__main__":
             lambda_array = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials))
 
             print(mode)
-            main(mode)
+            run_val(mode)
+            test(mode)

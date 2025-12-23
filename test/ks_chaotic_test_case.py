@@ -1,14 +1,19 @@
+from pathlib import Path
+import sys
+root = Path.cwd().resolve().parents[1]
+sys.path.insert(0, str(root))
+
+from diffusion_maps import model_dir, data_dir
+
 import pickle
-import general_utils
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed
 import cupy as cp
-import time
 
-from gindy.src.manifold import Manifold
-from dm_main import DMClass
-
+from src.krr_model import Modeler
+from src.dm_main import DMClass
+from src.utils import Manifold
 
 np.random.seed(42)
 cp.random.seed(42)
@@ -50,7 +55,7 @@ def run_val(mode):
 
     
     print("Starting to find reference hyper-parameters.")
-    ref_param_file = f"./numerical_results/ks_chaotic_ref_params_{num_points}.pkl"
+    ref_param_file = model_dir + f"/ks_chaotic/ks_chaotic_ref_params_{num_points}.pkl"
     epsilon_array = np.zeros((n_models, cv_trials_per_device*devices))
     lambda_array = np.zeros((n_models, cv_trials_per_device*devices))
     try:
@@ -183,7 +188,7 @@ def batched_compute_inner_cv(
     with cp.cuda.Device(device):
 
         opts["data"] = k_train
-        model = general_utils.modeler(**opts)
+        model = Modeler(**opts)
 
         X = cp.asarray(model.inp, dtype=cp.float64)
         n = cp.sum(X * X, axis=1) 
@@ -223,21 +228,14 @@ def batched_compute_inner_cv(
                 eps_chunk = epsilon_array[start:end]
                 lam_chunk = lambda_array[start:end]
 
-                # tic = time.time()
                 model.fit_model(eps_chunk, lam_chunk, mode, distance_matrix)
-                # toc = time.time()
-                # print(f"Fitting takes {toc-tic}sec")
 
-                # tic = time.time()
                 _vpt_chunk, _tau_f_chunk = model.get_performance(
                     j_valid,
                     dt=dt,
                     Lyapunov_time=1 / Lyapunov_exp,
                     error_threshold=error_threshold,
                 )
-                # toc = time.time()
-                # print(f"VPT takes {toc-tic}sec")
-
                 _vpt_chunk   = cp.asnumpy(_vpt_chunk)
                 _tau_f_chunk = cp.asnumpy(_tau_f_chunk)
 
@@ -256,7 +254,7 @@ def batched_compute_inner_cv(
 
 def run_test(mode):
 
-    cv_path = f"./numerical_results/ks_chaotic_cv_results_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
+    cv_path = model_dir + f"/ks_chaotic/ks_chaotic_cv_results_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(cv_path, "rb") as f:
         cv_results = pickle.load(f)
 
@@ -275,7 +273,7 @@ def run_test(mode):
     SKP = 500_000
     DT = 0.01
     TS = 10
-    data = pickle.load(open(f"./ks_utils/ksdata_chaotic_training_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
+    data = pickle.load(open(str(data_dir) + f"/cached_data/ksdata_chaotic_training_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
     dt = data["dt"]
     train = data["udata"].astype(np.float64)
 
@@ -283,7 +281,7 @@ def run_test(mode):
     SKP = 500_000
     DT = 0.01
     TS = 10
-    test_load = pickle.load(open(f"./ks_utils/ksdata_chaotic_test_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
+    test_load = pickle.load(open(str(data_dir) + f"/cached_data/ksdata_chaotic_test_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
     uu_test = test_load["udata"].astype(np.float64)
     test = uu_test[:steps*test_trials].reshape(test_trials, steps, -1)    
 
@@ -312,7 +310,7 @@ def run_test(mode):
                 local_opts = dict(opts)
                 local_opts["data"] = i_train
 
-                model = general_utils.modeler(**local_opts)
+                model = Modeler(**local_opts)
 
                 X = cp.asarray(model.inp, dtype=cp.float64)  # (N, d)
                 n = cp.sum(X * X, axis=1)                    # (N,)
@@ -371,19 +369,15 @@ def run_test(mode):
 
     print(f"test mean vpt: = {np.nanmean(vpts)}")
 
-    outp = f'./numerical_results/ks_chaotic_test_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl'
+    outp = model_dir + f'/ks_chaotic/ks_chaotic_test_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl'
     with open(outp, "wb") as f:
         pickle.dump(performance, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 
-
-
-
-
 if __name__ == "__main__":
 
-    num_points_lst = [2048, 4096, 8192]#, 16384]
+    num_points_lst = [2048, 4096, 8192, 16384]
     safety_lst = [0.3, 0.4, 0.5]
     steps = 2500
     cv_trials_per_device = 256
@@ -403,7 +397,7 @@ if __name__ == "__main__":
     SKP = 500_000
     DT = 0.01
     TS = 10
-    data = pickle.load(open(f"./ks_utils/ksdata_chaotic_training_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
+    data = pickle.load(open(str(data_dir) + f"/cached_data/ksdata_chaotic_training_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
     dt = data["dt"]
     xx = data["x"]
 
@@ -418,7 +412,7 @@ if __name__ == "__main__":
     for map_type in map_type_lst:
         opts = {
             "map_type": map_type,
-            "norm": False,
+            "pipeline": "batch"
             }
 
         for i_n, num_points in enumerate(num_points_lst):
@@ -439,8 +433,8 @@ if __name__ == "__main__":
             for mode in mode_lst:
                 print(f"mode = {mode}")
 
-                # run_val(mode)
-                # free_gpu_memory()
+                run_val(mode)
+                free_gpu_memory()
 
                 run_test(mode)
                 free_gpu_memory()

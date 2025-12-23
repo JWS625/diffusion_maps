@@ -7,10 +7,8 @@ from diffusion_maps import model_dir, data_dir
 
 import pickle
 import numpy as np
-from tqdm import tqdm
 from joblib import Parallel, delayed
 import cupy as cp
-import polars as pl
 from tqdm import tqdm
 
 from src.krr_model import Modeler
@@ -68,24 +66,20 @@ def free_gpu_memory():
     gc.collect()
     cp.cuda.runtime.deviceSynchronize()
 
-def main(mode):
+def run_val(mode):
     epsilon_array, lambda_array, rmse_array = compute_cv_rmse_with_parallelization(
         mode, dt, data_train_x, data_train_y, data_val
     )
 
-    pldf = pl.DataFrame(
-        {
-            "epsilon": list(epsilon_array),
-            "lambda": list(lambda_array),
-            "epsilon_c": eps,
-            "lambda_min":lambda_min,
-            "rmse": list(rmse_array),
-        }
-    )
+    results = {}
+    results["epsilon"] = epsilon_array
+    results["lambda"] = lambda_array
+    results["rmse"] = rmse_array
+    results["epsilon_c"] = eps
+    results["lambda_min"] = lambda_min
 
-    pldf.write_parquet(
-        str(model_dir) + f"./ks_traveling/ks_traveling_cv_{mode}_{num_points}_{map_type}_dt_0.02.parquet"
-    )
+    with open(model_dir + f"/ks_travelling/ks_travelling_cv_{mode}_{num_points}_{map_type}_dt_0.02.pkl", 'wb') as f:
+        pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     free_gpu_memory()
 
@@ -97,7 +91,7 @@ def load_data():
     SKP = 500000
     DT = 0.001
     TS = 10
-    data = pickle.load(open(str(data_dir) + f"/cached_data/ksdata_traveling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
+    data = pickle.load(open(data_dir + f"/cached_data/ksdata_travelling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
     dt = data["dt"]
     nu = data["nu"]
     xx = data["x"]
@@ -125,11 +119,9 @@ def load_data():
 
 def test(mode):
 
-    cv_results = pl.read_parquet(
-        str(model_dir) + f"./ks_traveling/ks_traveling_cv_{mode}_{num_points}_{map_type}_dt_0.02.parquet"
-    )
+    cv_results = pickle.load(open(str(model_dir) + f"/ks_travelling/ks_travelling_cv_{mode}_{num_points}_{map_type}_dt_0.02.pkl", "rb"))
     cv_rmse = cv_results["rmse"]
-    index = cv_rmse.arg_min()
+    index = np.argmin(cv_rmse)
     epsilon, lambda_reg = (
         cv_results["epsilon"][index],
         cv_results["lambda"][index],
@@ -138,11 +130,10 @@ def test(mode):
     opts["inp"] = data_train_x
     opts["out"] = data_train_y
 
-    distance_matrix = cp.linalg.norm(
-                cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
-            )
-
     model = Modeler(**opts)
+    distance_matrix = cp.linalg.norm(
+            cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
+        )
     
     model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
 
@@ -180,7 +171,7 @@ def test(mode):
     results["path"] = pred_path
 
     results_path = (
-        str(model_dir) + f"./ks_traveling/ks_traveling_{mode}_{num_points}_{map_type}_dt_0.02.pkl"
+        model_dir + f"/ks_travelling/ks_travelling_{mode}_{num_points}_{map_type}_dt_0.02.pkl"
     )
     with open(results_path, 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -227,9 +218,13 @@ def batched_compute_rmse_inner_cv(
                         _data_val = data_val[:num_points]
                         rmse += compute_rmse_inner_cv(
                             mode, dt, data_train_x, data_train_y,
-                            _data_val, epsilon, lambda_reg, device,
-                        )
+                            _data_val, epsilon, lambda_reg, device, True)
                     rmse /= validation_repeats
+                    chk = compute_rmse_inner_cv(
+                            mode, dt, data_train_x, data_train_y,
+                            _data_val, epsilon, lambda_reg, device, False)
+                    if np.isnan(chk):
+                        rmse = np.nan
                 except Exception as e:
                     print(f"[worker-{device}] trial failed: {e}")
                     rmse = np.nan
@@ -249,14 +244,20 @@ def compute_rmse_inner_cv(
     epsilon,
     lambda_reg,
     device=0,
+    random=True
 ):
     with cp.cuda.Device(device):
         
-        mask = np.zeros(data_train_x.shape[0]).astype(bool)
-        mask[:-num_points//(validation_repeats)] = 1
-        np.random.shuffle(mask)
-        opts["inp"] = data_train_x[mask]
-        opts["out"] = data_train_y[mask]
+        if random:
+            np.random.seed(142)
+            mask = np.zeros(data_train_x.shape[0]).astype(bool)
+            mask[:-num_points//(validation_repeats)] = 1
+            np.random.shuffle(mask)
+            opts["inp"] = data_train_x[mask]
+            opts["out"] = data_train_y[mask]
+        else:
+            opts["inp"] = data_train_x
+            opts["out"] = data_train_y
         model = Modeler(**opts)
 
         try:
@@ -276,7 +277,7 @@ def compute_rmse_inner_cv(
             error = path - cp.asarray(data_val[:len(path)])
             rmse = cp.sqrt(cp.mean((error)**2))
         except Exception as e:
-            rmse = float("nan")
+            rmse = np.nan
             print(e)
     return _to_float(rmse)
 
@@ -290,6 +291,7 @@ if __name__ == "__main__":
     map_type_lst = ["skip-connection"]
     mode_lst = ["diffusion", "rbf"]
     cv_trials = 4096
+    devices = 4
 
     for map_type in map_type_lst:
         opts = {
@@ -307,19 +309,20 @@ if __name__ == "__main__":
             eps_max = np.log10(eps) + 2
 
             with cp.cuda.Device(1):
-                devices = 4
-                for mode in mode_lst:
-                    print(f"map type: {map_type}, num points = {num_points}, mode = {mode}")
-                    dmK, _q1, _q2, _dist = DMClass._compute_kernel_matrix_and_densities(cp.asarray(data_train_x), epsilon=eps, mode=mode)
-                    rbfK = cp.exp(-(_dist**2) / (4 * eps))
-                    eig, eigvec = np.linalg.eig(rbfK.get())
-                    mineig = np.min(eig.real)
-                    lambda_min = np.log10(np.abs(mineig))
-                    print(f"lmabda from rbfK = {lambda_min}")
-                    
-                    epsilon_array = np.power(10, np.random.uniform(eps_min, eps_max, cv_trials))
-                    lambda_array = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials))
+                dmK, _q1, _q2, _dist = DMClass._compute_kernel_matrix_and_densities(cp.asarray(data_train_x), epsilon=eps, mode="rbf")
+                rbfK = cp.exp(-(_dist**2) / (4 * eps))
+                eig, eigvec = np.linalg.eig(rbfK.get())
+                mineig = np.min(eig.real)
+                lambda_min = np.log10(np.abs(mineig))
+                print(f"lmabda from rbfK = {lambda_min}")
+            
+            np.random.seed(1442)
+            epsilon_array = np.power(10, np.random.uniform(eps_min, eps_max, cv_trials))
+            lambda_array = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials))
 
-                    print(mode)
-                    main(mode)
-                    test(mode)
+            for mode in mode_lst:
+                print(f"map type: {map_type}, num points = {num_points}, mode = {mode}")
+    
+                print(mode)
+                run_val(mode)
+                test(mode)

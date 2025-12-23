@@ -1,25 +1,20 @@
-import os
+from pathlib import Path
+import sys
+root = Path.cwd().resolve().parents[1]
+sys.path.insert(0, str(root))
+
+from diffusion_maps import model_dir, data_dir
 
 import cupy as cp
-import krr_model
+from src.krr_model import Modeler
+from src.dm_main import DMClass
+from src.utils import Manifold
 import numpy as np
 
-# sphere
-import sphere_torus_utils.torus_data_gen as tdg
-import sphere_torus_utils.sphere_torus_helpers as sth
-
-# lorenz
-from lorenz import generateData as lorenz_datagen
-from lorenz import f as lorenz_f
 
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import pickle
-
-from gindy.src.manifold import Manifold
-from dm_main import DMClass
-
-import cupyx.scipy.linalg
 
 
 np.set_printoptions(precision=16, suppress=False)
@@ -73,7 +68,7 @@ def batched_compute_inner_cv(
     with cp.cuda.Device(device):
 
         opts["data"] = k_train
-        model = krr_model.modeler(**opts)
+        model = Modeler(**opts)
 
         X = cp.asarray(model.inp, dtype=cp.float64)
         n = cp.sum(X * X, axis=1)
@@ -167,7 +162,7 @@ def compute_cv_with_parallelization(k_train, k_valid, k_epsilon_array, k_lambda_
 def run_val():
 
     print("Starting to find reference hyper-parameters.")
-    ref_param_file = f"./numerical_results/lorenz_3d_ref_params_{num_points}.pkl"
+    ref_param_file = model_dir + f"/l63/lorenz_3d_ref_params_{num_points}.pkl"
     epsilon_array = np.zeros((n_models, cv_trials_per_device*devices))
     lambda_array = np.zeros((n_models, cv_trials_per_device*devices))
     try:
@@ -260,7 +255,7 @@ def run_val():
                 "validation_horizon":validation_horizon,
                 }
     
-    cv_filename = f"numerical_results/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
+    cv_filename = model_dir + f"/l63/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(cv_filename, "wb") as f:
         pickle.dump(cv_results, f)
 
@@ -273,7 +268,7 @@ def run_test():
     n_test, T, d = test.shape
 
     # Load CV results
-    path = f"numerical_results/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
+    path = model_dir + f"/l63/{title}_cv_result_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(path, "rb") as f:
         cv_results = pickle.load(f)
 
@@ -315,7 +310,7 @@ def run_test():
                 local_opts = dict(opts)
                 local_opts["data"] = i_train
 
-                model = krr_model.modeler(**local_opts)
+                model = Modeler(**local_opts)
 
                 X = cp.asarray(model.inp, dtype=cp.float64)  # (N, d)
                 n = cp.sum(X * X, axis=1)                    # (N,)
@@ -374,7 +369,7 @@ def run_test():
 
     print(f"test mean vpt: = {np.mean(vpts)}")
 
-    outp = f"./numerical_results/lorenz_3d_test_result_{mode}_{map_type}_{num_points}_vl_{validation_length}.pkl"
+    outp = model_dir + f"/l63/lorenz_3d_test_result_{mode}_{map_type}_{num_points}_vl_{validation_length}.pkl"
     with open(outp, "wb") as f:
         pickle.dump(performance, f, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -382,7 +377,7 @@ def run_test():
 
 if __name__ == "__main__":
 
-    num_points_lst = [512, 1024, 2048, 4096]
+    num_points_lst = [512]#, 1024, 2048, 4096]
     devices = 4
     dt = 0.01
     cv_trials_per_device = 1024
@@ -396,7 +391,7 @@ if __name__ == "__main__":
 
     n_models = 500
     # Datasets 
-    train = np.load("./cached_data/lorenz_train.npy").T
+    train = np.load(data_dir + "/cached_data/lorenz_train.npy").T
     validation_horizon = 1500
     validation_size_multiplier = 2
     validation_repeats = 3
@@ -408,7 +403,7 @@ if __name__ == "__main__":
     for map_type in map_type_lst:
         opts = {
         "map_type": map_type,
-        "norm": False,
+        "pipeline" : "batch"
         }
         
         for i_n, num_points in enumerate(num_points_lst):
@@ -429,8 +424,8 @@ if __name__ == "__main__":
             for mode in mode_list:
                 print(f"mode = {mode}")
                 
-                # run_val()
-                # free_gpu_memory()
+                run_val()
+                free_gpu_memory()
                     
                 run_test()
                 free_gpu_memory()

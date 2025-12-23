@@ -25,8 +25,8 @@ import cupy as cp
 prob = "torus"
 np.random.seed(42)
 
-filename_training = lambda u, N, d: str(data_dir) + f"/cached_data/{prob}_training_data_{u}_{N}_{d}.npy"
-cv_filename = lambda mode, n, map_type : str(model_dir) + f"/torus/{title}_cv_result_{mode}_{n}_{map_type}_dt_{dt}.parquet" 
+filename_training = lambda u, N, d: data_dir + f"/cached_data/{prob}_training_data_{u}_{N}_{d}.npy"
+cv_filename = lambda mode, n, map_type : model_dir + f"/torus/{title}_cv_result_{mode}_{n}_{map_type}_dt_{dt}.parquet" 
 
 
 def free_gpu_memory():
@@ -112,7 +112,7 @@ def compute_error(epsilon_array, lambda_array, mode, devices):
     return np.concatenate(output)
 
 
-def run_cv():
+def run_val():
     cv_rmse_array = compute_error(
         epsilon_array, lambda_array, mode, devices
     )
@@ -128,7 +128,7 @@ def run_cv():
     cv_result.write_parquet(cv_filename(mode, num_points, map_type))
 
 
-def run_test():
+def test():
 
     cv_results = pl.read_parquet(cv_filename(mode, num_points, map_type))
 
@@ -159,7 +159,6 @@ def run_test():
                 "epsilon": best_epsilon * np.ones(devices),
                 "lambda_reg": best_lambda_reg * np.ones(devices),
                 "rmse": [float(err) for err in test_err]
-                #"final_rmse": [i[-1] for i in results_array],
             }
         )
         results_df_list.append(results_df)
@@ -168,7 +167,7 @@ def run_test():
     results_df = pl.concat(results_df_list)
 
     results_df.write_parquet(
-        str(model_dir) + f"/torus/{title}_test_result_{mode}_{num_points}_{map_type}_dt_{dt}.parquet"
+        model_dir + f"/torus/{title}_test_result_{mode}_{num_points}_{map_type}_dt_{dt}.parquet"
     )
     return results_df
 
@@ -214,7 +213,7 @@ if __name__ == "__main__":
     cv_trials_per_device = 1024
     test_trials = 8
     mode_list = ["diffusion", "rbf"]
-    x0_test = np.load(str(data_dir) + f'/cached_data/sphere_test_data.npy')
+    x0_test = np.load(data_dir + f'/cached_data/sphere_test_data.npy')
     map_type_lst = ["skip-connection"]
 
     x0_lst = []
@@ -256,9 +255,9 @@ if __name__ == "__main__":
 
                     opts['inp'] = training_data_x
                     opts['out'] = training_data_y
-                    run_cv()
+                    run_val()
                     free_gpu_memory()
-                    run_test()
+                    test()
                     free_gpu_memory()
 
 
