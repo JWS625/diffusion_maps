@@ -94,8 +94,17 @@ def run_val(mode):
             eps_min = epsilon_mid - 1
             eps_max = epsilon_mid + 1
 
-            kernel_matrix, _q1, _q2, _dist = DMClass._compute_kernel_matrix_and_densities(cp.array(k_train), epsilon=eps, mode=mode)
-            rbfK = cp.exp(-(_dist**2) / (4 * eps))
+            X = cp.array(k_train)
+            n = cp.sum(X * X, axis=1)
+            distance_matrix = X @ X.T
+            distance_matrix *= -2.0
+            distance_matrix += n[:, None]
+            distance_matrix += n[None, :]
+            cp.maximum(distance_matrix, 0.0, out=distance_matrix)
+            cp.sqrt(distance_matrix, out=distance_matrix)
+            cp.fill_diagonal(distance_matrix, 0.0)
+            distance_matrix = 0.5 * (distance_matrix + distance_matrix.T)
+            rbfK = cp.exp(-(distance_matrix**2) / (4 * eps))
 
             eig, eigvec = np.linalg.eig(rbfK.get())
             mineig = np.min(eig.real)
@@ -147,7 +156,7 @@ def run_val(mode):
                 "validation_horizon":validation_horizon,
                 }
 
-    cv_filename = f"./numerical_results/ks_chaotic_cv_results_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
+    cv_filename = model_dir + f"/ks_chaotic/ks_chaotic_cv_results_{mode}_{num_points}_{map_type}_vl_{validation_length}.pkl"
     with open(cv_filename, "wb") as f:
         pickle.dump(cv_results, f)
 

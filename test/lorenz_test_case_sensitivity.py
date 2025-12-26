@@ -118,9 +118,6 @@ def batched_compute_inner_cv(
         
         return tau_f_array, vpt_array
 
-        
-
-
 
 def compute_cv_with_parallelization(k_train, k_valid, k_epsilon_array, k_lambda_array, mode, devices):
 
@@ -186,8 +183,17 @@ def run_cv():
             eps_min = epsilon_mid - 2
             eps_max = epsilon_mid + 2
 
-            kernel_matrix, _q1, _q2, _dist = DMClass._compute_kernel_matrix_and_densities(cp.array(k_train), epsilon=eps, mode=mode)
-            rbfK = cp.exp(-(_dist**2) / (4 * eps))
+            X = cp.array(k_train)
+            n = cp.sum(X * X, axis=1)
+            distance_matrix = X @ X.T
+            distance_matrix *= -2.0
+            distance_matrix += n[:, None]
+            distance_matrix += n[None, :]
+            cp.maximum(distance_matrix, 0.0, out=distance_matrix)
+            cp.sqrt(distance_matrix, out=distance_matrix)
+            cp.fill_diagonal(distance_matrix, 0.0)
+            distance_matrix = 0.5 * (distance_matrix + distance_matrix.T)
+            rbfK = cp.exp(-(distance_matrix**2) / (4 * eps))
 
             eig, eigvec = np.linalg.eig(rbfK.get())
             mineig = np.min(eig.real)
@@ -208,8 +214,6 @@ def run_cv():
         with open(ref_param_file, "wb") as f:
             pickle.dump(ref_params, f)
 
-       
-    print(f"eps_min = {eps_min}, eps_max = {eps_max}, lambda min = {lambda_min}")
     print("Finding reference is done.")
 
     print("Starting validation process.")

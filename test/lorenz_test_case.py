@@ -95,12 +95,10 @@ def batched_compute_inner_cv(
         else:
             validation_indices = np.zeros(validation_repeats, dtype=int)
         
-
         for j in range(validation_repeats):
             j_valid = k_valid[
                 validation_indices[j] : validation_indices[j] + validation_horizon
             ]
-
 
             chunk_size = n_chunk_lst[device]
 
@@ -171,10 +169,12 @@ def run_val():
             ref_epsilon = ref_params["epsilon"]
             ref_lambda = ref_params["lambda_reg"]
         print("Existing referene params found")
-            
+        # print(f"ref_epsilon = {ref_epsilon[:5]}, ref_lambda = {ref_lambda[:5]}")
+
         for k in tqdm(range(n_models)):
             k_eps = ref_epsilon[k]
             lambda_min = ref_lambda[k]
+            
 
             eps_min = k_eps - 2
             eps_max = k_eps + 2
@@ -187,7 +187,6 @@ def run_val():
 
         print(f"No existing reference hyper-parameters. \nFinding reference....")
         # Finding reference hyperparameters
-        
         ref_epsilon = np.zeros(test_trials)
         ref_lambda = np.zeros(test_trials)
 
@@ -201,8 +200,17 @@ def run_val():
             eps_min = epsilon_mid - 2
             eps_max = epsilon_mid + 2
 
-            kernel_matrix, _q1, _q2, _dist = DMClass._compute_kernel_matrix_and_densities(cp.array(k_train), epsilon=eps, mode=mode)
-            rbfK = cp.exp(-(_dist**2) / (4 * eps))
+            X = cp.array(k_train)
+            n = cp.sum(X * X, axis=1)
+            distance_matrix = X @ X.T
+            distance_matrix *= -2.0
+            distance_matrix += n[:, None]
+            distance_matrix += n[None, :]
+            cp.maximum(distance_matrix, 0.0, out=distance_matrix)
+            cp.sqrt(distance_matrix, out=distance_matrix)
+            cp.fill_diagonal(distance_matrix, 0.0)
+            distance_matrix = 0.5 * (distance_matrix + distance_matrix.T)
+            rbfK = cp.exp(-(distance_matrix**2) / (4 * eps))
 
             eig, eigvec = np.linalg.eig(rbfK.get())
             mineig = np.min(eig.real)
@@ -214,13 +222,14 @@ def run_val():
             np.random.seed(1442)
             epsilon_array[k, :] = np.power(10, np.random.uniform(eps_min, eps_max, cv_trials_per_device * devices)) 
             lambda_array[k, :] = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials_per_device * devices))
-
         ref_params = {
             'epsilon': ref_epsilon,
             'lambda_reg': ref_lambda,
         }
+
         with open(ref_param_file, "wb") as f:
             pickle.dump(ref_params, f)
+    
 
     print("Finding reference is done.")
     print("Starting validation process.")
@@ -235,7 +244,6 @@ def run_val():
             devices,
         )
 
-        # predictions.append(k_preds)
         cv_tau_f_array.append(k_tau_f_array)
         cv_vpt_array.append(k_vpt_array)
 
@@ -263,8 +271,8 @@ def run_val():
 
 def run_test():
 
-    train = np.load("./cached_data/lorenz_train.npy").T
-    test = np.load('./cached_data/lorenz_test.npy').transpose(0, 2, 1)
+    train = np.load(data_dir + "/cached_data/lorenz_train.npy").T
+    test = np.load(data_dir + '/cached_data/lorenz_test.npy').transpose(0, 2, 1)
     n_test, T, d = test.shape
 
     # Load CV results
@@ -281,7 +289,6 @@ def run_test():
     
     best_epsilon   = epsilon_array_loc[rows, best_idx]     # shape (n_models,)
     best_lambda_reg = lambda_reg_array_loc[rows, best_idx] # shape (n_models,)
-
     vpts_all = np.zeros((n_models, test_trials))
     vpts    = np.zeros(n_models)
     tau_fs  = np.zeros(n_models)
@@ -303,8 +310,6 @@ def run_test():
 
                 i_epsilon    = best_epsilon[i]
                 i_lambda_reg = best_lambda_reg[i]
-
-                print(i_epsilon.shape)
 
                 i_train = train[data_indices[i] : data_indices[i] + num_points]
                 local_opts = dict(opts)
@@ -380,7 +385,7 @@ if __name__ == "__main__":
     num_points_lst = [512]#, 1024, 2048, 4096]
     devices = 4
     dt = 0.01
-    cv_trials_per_device = 1024
+    cv_trials_per_device = 4 #1024
     mode_list = ["diffusion", "rbf"]
     map_type_lst = ['skip-connection']
     test_trials = 500
@@ -397,7 +402,6 @@ if __name__ == "__main__":
     validation_repeats = 3
 
     validation_length = int(validation_horizon * validation_size_multiplier)
-    print(f"validation_length = {validation_length}")
 
     
     for map_type in map_type_lst:
