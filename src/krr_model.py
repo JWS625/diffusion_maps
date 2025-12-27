@@ -118,14 +118,13 @@ class SingleModeler:
             lambda_reg,
             mode=mode,
             distance_matrix=distance_matrix,
+            pipeline="single"
         )
-
 
     def mapping(self, x0):
         return self.dm.predict(x0)
 
     def forecast(self, x0):
-        """Accepts RAW x0 (NumPy or CuPy), returns prediction in RAW units."""
         xp = cp.get_array_module(x0)
         x0 = xp.array(x0)
         if self.dm is None:
@@ -135,7 +134,6 @@ class SingleModeler:
         return x0 + t if self.map_type == 'skip-connection' else t
 
     def get_performance(self, test, dt, Lyapunov_time, error_threshold=0.3**2, return_pred=False):
-        assert test.ndim == 2
         assert self.epsilon is not None
         assert self.lambda_reg is not None
 
@@ -274,7 +272,7 @@ class BatchModeler:
             lambda_reg,
             mode=mode,
             distance_matrix=distance_matrix,
-
+            pipeline="batch"
         )
 
 
@@ -384,12 +382,9 @@ class BatchModeler:
     def get_vpt(self, test, dt, Lyapunov_time, error_threshold=0.3**2, return_pred=False):
         """
         Forecast times (Lyapunov units) using NMSE and SE.
-
-        Always uses the multi-parameter pipeline internally.
         If epsilon is scalar, it's treated as a length-1 vector (P = 1).
         """
         test = cp.asarray(test)
-        # number of hyperparameters (scalar epsilon -> P = 1)
         P = int(np.asarray(self.epsilon).size)
         assert P >= 1
 
