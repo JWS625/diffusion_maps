@@ -12,10 +12,24 @@ data/cached_data/*
 !data/cached_data/.gitkeep
 !data/figs/.gitkeep
 
-# Trained model directory
-trained_mdls/*
-!traind_mdls/.gitkeep
+# Trained models
+trained_mdls/**
 
+!trained_mdls/
+!trained_mdls/*/
+!trained_mdls/*/*/
+
+!trained_mdls/**/.gitkeep
+
+!trained_mdls/ks_chaotic/ks_chaotic_ref_params_2048.pkl
+!trained_mdls/ks_chaotic/ks_chaotic_ref_params_4096.pkl
+!trained_mdls/ks_chaotic/ks_chaotic_ref_params_8192.pkl
+!trained_mdls/ks_chaotic/ks_chaotic_ref_params_16384.pkl
+
+!trained_mdls/l63/lorenz_3d_ref_params_512.pkl
+!trained_mdls/l63/lorenz_3d_ref_params_1024.pkl
+!trained_mdls/l63/lorenz_3d_ref_params_2048.pkl
+!trained_mdls/l63/lorenz_3d_ref_params_4096.pkl
 
 # Figures
 *pics/
