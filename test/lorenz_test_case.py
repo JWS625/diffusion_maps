@@ -94,7 +94,7 @@ def batched_compute_inner_cv(
             )
         else:
             validation_indices = np.zeros(validation_repeats, dtype=int)
-        
+        validation_indices = [353, 314,  81]
         for j in range(validation_repeats):
             j_valid = k_valid[
                 validation_indices[j] : validation_indices[j] + validation_horizon
@@ -126,7 +126,7 @@ def batched_compute_inner_cv(
 
         vpt_array   /= validation_repeats
         tau_f_array /= validation_repeats
-        
+
         return tau_f_array, vpt_array
 
         
@@ -169,16 +169,14 @@ def run_val():
             ref_epsilon = ref_params["epsilon"]
             ref_lambda = ref_params["lambda_reg"]
         print("Existing referene params found")
-        # print(f"ref_epsilon = {ref_epsilon[:5]}, ref_lambda = {ref_lambda[:5]}")
 
         for k in tqdm(range(n_models)):
             k_eps = ref_epsilon[k]
             lambda_min = ref_lambda[k]
             
-
             eps_min = k_eps - 2
             eps_max = k_eps + 2
-            
+
             np.random.seed(1442)
             epsilon_array[k, :] = np.power(10, np.random.uniform(eps_min, eps_max, cv_trials_per_device * devices)) 
             lambda_array[k, :] = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials_per_device * devices))
@@ -187,8 +185,8 @@ def run_val():
 
         print(f"No existing reference hyper-parameters. \nFinding reference....")
         # Finding reference hyperparameters
-        ref_epsilon = np.zeros(test_trials)
-        ref_lambda = np.zeros(test_trials)
+        ref_epsilon = np.zeros(n_models)
+        ref_lambda = np.zeros(n_models)
 
         for k in tqdm(range(n_models)):
             k_train = train[data_indices[k]:data_indices[k]+num_points]
@@ -219,6 +217,7 @@ def run_val():
             ref_epsilon[k] = epsilon_mid
             ref_lambda[k] = lambda_min
 
+            free_gpu_memory()
             np.random.seed(1442)
             epsilon_array[k, :] = np.power(10, np.random.uniform(eps_min, eps_max, cv_trials_per_device * devices)) 
             lambda_array[k, :] = np.power(10, np.random.uniform(lambda_min, lambda_min+4, cv_trials_per_device * devices))
@@ -229,12 +228,12 @@ def run_val():
 
         with open(ref_param_file, "wb") as f:
             pickle.dump(ref_params, f)
-    
+
 
     print("Finding reference is done.")
     print("Starting validation process.")
     cv_tau_f_array = []; cv_vpt_array = []
-    for k in tqdm(range(test_trials)):
+    for k in tqdm(range(n_models)):
         k_tau_f_array, k_vpt_array = compute_cv_with_parallelization( 
             train[data_indices[k]:data_indices[k]+num_points],
             train[data_indices[k]+num_points:data_indices[k]+num_points+validation_length],
@@ -249,7 +248,7 @@ def run_val():
 
     cv_tau_f_array = np.array(cv_tau_f_array)
     cv_vpt_array = np.array(cv_vpt_array)
-
+    
     cv_results = {
                 "epsilon": epsilon_array,
                 "lambda": lambda_array,
@@ -289,13 +288,15 @@ def run_test():
     
     best_epsilon   = epsilon_array_loc[rows, best_idx]     # shape (n_models,)
     best_lambda_reg = lambda_reg_array_loc[rows, best_idx] # shape (n_models,)
+
+
     vpts_all = np.zeros((n_models, test_trials))
     vpts    = np.zeros(n_models)
     tau_fs  = np.zeros(n_models)
 
     all_indices = np.arange(n_models)
     index_splits = np.array_split(all_indices, devices)
-
+    
     def _run_test_block(index_block, device):
 
         with cp.cuda.Device(device):
@@ -317,8 +318,8 @@ def run_test():
 
                 model = Modeler(**local_opts)
 
-                X = cp.asarray(model.inp, dtype=cp.float64)  # (N, d)
-                n = cp.sum(X * X, axis=1)                    # (N,)
+                X = cp.asarray(model.inp, dtype=cp.float64)
+                n = cp.sum(X * X, axis=1)
 
                 distance_matrix = X @ X.T
                 distance_matrix *= -2.0
@@ -330,18 +331,22 @@ def run_test():
                 distance_matrix = 0.5 * (distance_matrix + distance_matrix.T)
 
                 model.fit_model(i_epsilon, i_lambda_reg, mode,  distance_matrix=distance_matrix)
+                cp.set_printoptions(precision=16, suppress=False)
+                
 
                 vpt_sum = 0.0
                 tau_sum = 0.0
 
                 for start in range(0, test_trials, chunk_size):
                     end = min(test_trials, start + chunk_size)
+                    
                     vpt_j, tau_f_j = model.get_performance(
                         test[start:end],
                         dt=dt,
                         Lyapunov_time=1 / Lyapunov_exp,
                         error_threshold=error_threshold,
                     )
+
                     vpts_all_block[local_idx, start:end] = vpt_j
                     vpt_sum  += np.sum(vpt_j)
                     tau_sum  += np.sum(tau_f_j)
@@ -382,10 +387,10 @@ def run_test():
 
 if __name__ == "__main__":
 
-    num_points_lst = [512]#, 1024, 2048, 4096]
+    num_points_lst = [512, 1024, 2048, 4096]
     devices = 4
     dt = 0.01
-    cv_trials_per_device = 4 #1024
+    cv_trials_per_device = 1024
     mode_list = ["diffusion", "rbf"]
     map_type_lst = ['skip-connection']
     test_trials = 500
@@ -420,7 +425,7 @@ if __name__ == "__main__":
 
             np.random.seed(142)
             data_indices = np.random.randint(
-                train.shape[0] - (num_points + validation_length), size=test_trials
+                train.shape[0] - (num_points + validation_length), size=n_models
             )
 
             print(f"  num_points={num_points}, map_type={map_type}")
