@@ -36,10 +36,10 @@ diffusion_maps/
 │   ├── cached_data/
 │   │   ├── ksdataBeatingTraveling.mat
 │   │   ├── ksdata_chaotic_test_NT_12500000_SKP_500000_dt_0.01_ts_10.pkl
-│   │   ├── ksdata_chaotic_training_NT_15000000_SKP_500000_dt_0.01_ts_10.pkl
+│   │   └── ksdata_chaotic_training_NT_15000000_SKP_500000_dt_0.01_ts_10.pkl
 │   │   ├── ksdata_travelling_NT_5000000_SKP_500000_dt_0.001_ts_10.pkl
 │   │   ├── lorenz_test.npy
-│   │   ├── lorenz_train.npy
+│   │   └── lorenz_train.npy
 │   ├── figs/
 │   ├── sphere_torus_utils/
 │   │   ├── __init__.py
@@ -89,15 +89,15 @@ diffusion_maps/
 │   │   ├── ks_chaotic_ref_params_16384.pkl
 │   │   ├── ks_chaotic_ref_params_2048.pkl
 │   │   ├── ks_chaotic_ref_params_4096.pkl
-│   │   ├── ks_chaotic_ref_params_8192.pkl
+│   │   └── ks_chaotic_ref_params_8192.pkl
 │   ├── ks_travelling/
 │   ├── l63/
 │   │   ├── lorenz_3d_ref_params_1024.pkl
 │   │   ├── lorenz_3d_ref_params_2048.pkl
 │   │   ├── lorenz_3d_ref_params_4096.pkl
-│   │   ├── lorenz_3d_ref_params_512.pkl
+│   │   └── lorenz_3d_ref_params_512.pkl
 │   ├── ppplate/
-│   │   ├── ppplate_ResDMD_rank_145.npy
+│   │   └── ppplate_ResDMD_rank_145.npy
 │   └── torus/
 ├── .gitignore
 ├── README.md
