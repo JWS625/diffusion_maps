@@ -5,7 +5,6 @@ sys.path.insert(0, str(root))
 
 from diffusion_maps import model_dir, data_dir
 
-import pickle
 from src.krr_model import Modeler
 import numpy as np
 from tqdm import tqdm
