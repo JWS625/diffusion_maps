@@ -62,36 +62,36 @@ def compute_error_inner(
         for i, (epsilon, lambda_reg) in tqdm(
             enumerate(zip(epsilon_array, lambda_array)), total=len(epsilon_array)
         ):
-            # try:
-            distance_matrix = cp.linalg.norm(
-                cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
-            )
-            model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
+            try:
+                distance_matrix = cp.linalg.norm(
+                    cp.array(model.inp[:, None]) - cp.array(model.inp[None]), axis=-1
+                )
+                model.fit_model(epsilon, lambda_reg, mode, distance_matrix=distance_matrix)
 
-            x0 = sth.generateInitialConditions_(12)
-            truePath = sth.generateData_(x0, validation_horizon * dt, dt)
-            # convert to torus
-            truePath, theta, phi = sth.changetotorus_(truePath)
-            truePath = tdg.map_to_torus_(theta, phi, d)
-            x0 = cp.array(np.copy(truePath[0]))
-            pred_path = [cp.copy(x0)]
-            hit_nan = False
-            for _ in range(validation_horizon*2):
-                x0 = model.forecast(x0)
-                if cp.isnan(x0).any():
-                    hit_nan = True
-                    break
-                pred_path.append(cp.copy(x0))
+                x0 = sth.generateInitialConditions_(12)
+                truePath = sth.generateData_(x0, validation_horizon * dt, dt)
+                # convert to torus
+                truePath, theta, phi = sth.changetotorus_(truePath)
+                truePath = tdg.map_to_torus_(theta, phi, d)
+                x0 = cp.array(np.copy(truePath[0]))
+                pred_path = [cp.copy(x0)]
+                hit_nan = False
+                for _ in range(validation_horizon*2):
+                    x0 = model.forecast(x0)
+                    if cp.isnan(x0).any():
+                        hit_nan = True
+                        break
+                    pred_path.append(cp.copy(x0))
 
-            if hit_nan:
+                if hit_nan:
+                    l2_err_array[i] = np.nan
+                    continue
+                
+                pred_path = cp.array(pred_path)[:validation_horizon+1] # [T, Va, d]
+                truePath = cp.array(truePath)
+                l2_err_array[i] = cp.sqrt(cp.mean((pred_path-truePath)**2, axis=(0, 2))).mean()
+            except Exception as e:
                 l2_err_array[i] = np.nan
-                continue
-            
-            pred_path = cp.array(pred_path)[:validation_horizon+1] # [T, Va, d]
-            truePath = cp.array(truePath)
-            l2_err_array[i] = cp.sqrt(cp.mean((pred_path-truePath)**2, axis=(0, 2))).mean()
-            # except Exception as e:
-            #     l2_err_array[i] = np.nan
     return l2_err_array
 
 
