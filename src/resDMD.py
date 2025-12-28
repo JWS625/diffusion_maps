@@ -1,5 +1,4 @@
 import os
-import pickle
 import numpy as np
 import scipy.linalg as spl
 
@@ -19,18 +18,14 @@ def _svd_truncate(S, energy_threshold=None, r=None):
     return len(S)
 
 
-def _filename_candidates(H):
-    return [
-        f"omega_cube_phaseA_0.0000_phaseH_{H}.0000.pkl",
-        f"omega_cube_phaseA_0.0000_phaseH_{float(H):.4f}.0000.pkl",
-    ]
+def _filename(H):
+    return f"omega_cube_phaseA_0_phaseH_{H}.npy"
 
 
 def _find_file(basepath, H):
-    for name in _filename_candidates(H):
-        p = os.path.join(basepath, name)
-        if os.path.exists(p):
-            return p
+    p = os.path.join(basepath, _filename(H))
+    if os.path.exists(p):
+        return p
     raise FileNotFoundError(f"Could not find file for H={H} under {basepath}")
 
 
@@ -39,10 +34,9 @@ def _load_raw_sequence(H, basepath, N, N_trun, ds=1, dtype=np.float64):
     Load one realization, return dat with shape (N_used, m) WITHOUT demeaning.
     """
     fn = _find_file(basepath, H)
-    with open(fn, "rb") as fh:
-        vort = pickle.load(fh)["omega"]
-    vort = vort[N_trun:]                            # time truncate
-    vort = vort.reshape(len(vort), -1).astype(dtype, copy=False)  # (T, m)
+    vort = np.load(fn)
+    vort = vort[N_trun:]
+    vort = vort.reshape(len(vort), -1).astype(dtype, copy=False)
     if ds is None or ds < 1:
         ds = 1
     vort = vort[::ds, :]
@@ -60,20 +54,18 @@ def _exact_dmd(X, Y, r=None, energy_threshold=None, dt=None):
     Returns:
       lam, Phi, b0, omega, U_r, S_r, V_r
     """
-    U, S, Vh = np.linalg.svd(X, full_matrices=False)  # U (m,T), S (T,), Vh (T,T)
+    U, S, Vh = np.linalg.svd(X, full_matrices=False)
     r_eff = _svd_truncate(S, energy_threshold=energy_threshold, r=r)
     U_r = U[:, :r_eff]                    # (m, r)
     S_r = S[:r_eff]                       # (r,)
     V_r = Vh.conj().T[:, :r_eff]          # (T, r)
 
-    # Reduced operator Ã
-    Atilde = U_r.conj().T @ Y @ V_r @ np.diag(1.0 / S_r)   # (r, r)
-    lam, W = np.linalg.eig(Atilde)                         # eigenvalues, right eigvecs in reduced space
+    Atilde = U_r.conj().T @ Y @ V_r @ np.diag(1.0 / S_r)
+    lam, W = np.linalg.eig(Atilde)
 
     # Full DMD modes
-    Phi = (Y @ V_r) @ np.diag(1.0 / S_r) @ W               # (m, r)
+    Phi = (Y @ V_r) @ np.diag(1.0 / S_r) @ W
 
-    # default amplitude from first snapshot
     b0, *_ = np.linalg.lstsq(Phi, X[:, 0], rcond=None)
 
     omega = None if (dt is None or dt <= 0) else np.log(lam) / dt
@@ -87,7 +79,7 @@ def _dmd_reconstruct(Phi, lam, b, timesteps):
     Returns (m,K) complex.
     """
     k = np.asarray(timesteps)
-    Vand = lam[:, None] ** k[None, :]    # (r,K)
+    Vand = lam[:, None] ** k[None, :]
     return Phi @ (b[:, None] * Vand)
 
 
@@ -110,7 +102,7 @@ class ResDMD:
     Exact DMD on multiple realizations + ResDMD residuals in reduced SVD space.
 
     Workflow:
-      1) fit(...)      -> build global mean, stack X,Y, compute SVD & DMD eigensystem
+      1) fit(...)      -> build global mean, stack X,Y, compute SVD and DMD eigensystem
       2) compute_residuals_sako()    -> one residual per eigenpair (r-dimensional)
       3) validate_residual_order_external(...)   -> pick best truncation order externally
       4) filter_by_residual(order=...)           -> activate chosen subset of modes
@@ -154,7 +146,6 @@ class ResDMD:
         H_sets_train : list of angles (or identifiers)
         N_train      : number of time steps per realization (after N_trun)
         """
-        # 1) Global mean via Welford
         mean_vec = None
         count = 0
         raw_cache = {}
@@ -173,14 +164,13 @@ class ResDMD:
         self.mean_vec_ = mean_vec
         self.m_ = mean_vec.size
 
-        # 2) Build global X,Y (centered by training mean)
         X_list, Y_list = [], []
         for H in H_sets_train:
             dat_dm = raw_cache[H] - self.mean_vec_[None, :]
-            X_list.append(dat_dm[:-1].T.astype(self.dtype, copy=False))  # (m, N-1)
-            Y_list.append(dat_dm[ 1:].T.astype(self.dtype, copy=False))  # (m, N-1)
-        X_tr = np.concatenate(X_list, axis=1)  # (m, T_total)
-        Y_tr = np.concatenate(Y_list, axis=1)  # (m, T_total)
+            X_list.append(dat_dm[:-1].T.astype(self.dtype, copy=False))
+            Y_list.append(dat_dm[ 1:].T.astype(self.dtype, copy=False))
+        X_tr = np.concatenate(X_list, axis=1)
+        Y_tr = np.concatenate(Y_list, axis=1)
         self._Y_tr = Y_tr
 
         # 3) Exact DMD
@@ -190,17 +180,14 @@ class ResDMD:
             dt=self.dt
         )
 
-        # Cache factors
         self._U_r = U_r
         self._S_r = S_r
         self._V_r = V_r
 
-        # Full eigensystem
         self.Phi_full_   = Phi.astype(np.complex128, copy=False)
         self.lam_full_   = lam.astype(np.complex128, copy=False)
         self.omega_full_ = None if omega is None else omega.astype(np.complex128, copy=False)
 
-        # Active = full initially
         self.Phi_   = self.Phi_full_.copy()
         self.lam_   = self.lam_full_.copy()
         self.omega_ = None if self.omega_full_ is None else self.omega_full_.copy()
@@ -208,7 +195,6 @@ class ResDMD:
 
         return self
 
-    # Reduced ResDMD / Spectral analysis
     def _build_Psi_reduced(self):
         """
         Build reduced (T x r) Psi0, Psi1 using SVD coordinates.
@@ -222,12 +208,12 @@ class ResDMD:
         if self._U_r is None or self._S_r is None or self._V_r is None or self._Y_tr is None:
             raise RuntimeError("fit() must be called before computing residuals.")
 
-        Vh_r = self._V_r.conj().T        # (r, T_total)
-        Z0   = np.diag(self._S_r) @ Vh_r # (r, T_total)
-        Z1   = self._U_r.conj().T @ self._Y_tr  # (r, T_total)
+        Vh_r = self._V_r.conj().T
+        Z0   = np.diag(self._S_r) @ Vh_r
+        Z1   = self._U_r.conj().T @ self._Y_tr
 
-        Psi0_r = Z0.T   # (T_total, r)
-        Psi1_r = Z1.T   # (T_total, r)
+        Psi0_r = Z0.T
+        Psi1_r = Z1.T
         return Psi0_r, Psi1_r
 
     def compute_residuals_sako(self, W=None, eps=1e-12, B=None):
@@ -254,7 +240,7 @@ class ResDMD:
             raise RuntimeError("Model not fitted.")
 
         # 1) Reduced Psi matrices
-        Psi0, Psi1 = self._build_Psi_reduced()         # (T, r)
+        Psi0, Psi1 = self._build_Psi_reduced()
         T, r = Psi0.shape
 
         # 2) Time weights
@@ -264,7 +250,6 @@ class ResDMD:
 
         # 3) Inner products in reduced space (r x r)
         def _M(Pi, Pj):
-            # Pi,Pj: (T,r) -> (r,r)
             return (Pi.conj().T * W) @ Pj
 
         M00 = _M(Psi0, Psi0)
@@ -293,7 +278,7 @@ class ResDMD:
         vr = vr / sr.reshape(1, -1)
         vl = vl / sl.reshape(1, -1)
 
-        # 6) G(λ) and residuals
+        # 6) G(lam) and residuals
         def _G_of(lam):
             G = M11 - lam * M10 - lam.conjugate() * M01 + (abs(lam) ** 2) * M00
             return 0.5 * (G + G.conj().T)
@@ -309,7 +294,7 @@ class ResDMD:
 
         lam_eval = wd
 
-        # 7) Align to model eigenvalues (from Ã)
+        # 7) Align to model eigenvalues (from reduced A)
         lam_model = self.lam_full_
         res_aligned = np.empty(lam_model.size, dtype=np.float64)
         for j, lm in enumerate(lam_model):
@@ -382,7 +367,7 @@ class ResDMD:
 
     def reconstruct_sequence(self, H, N, add_back_mean=False):
         """
-        Load realization H (N frames), subtract TRAINING mean, and roll out from first snapshot.
+        Load realization H (N frames), subtract training mean, and roll out from first snapshot.
 
         Returns dict with keys:
           'X_demeaned_truth', 'Xrec', 'b', 'relative_error', 'rmse', 'H', 'K'
@@ -456,8 +441,8 @@ def validate_residual_order_external(
     orders,
     *,
     keep_conjugates=True,
-    metric="rmse",       # 'rmse' or 'rel'
-    aggregate="mean",    # 'mean' | 'median' | 'max'
+    metric="rmse",
+    aggregate="mean",
     apply_best=True,
 ):
     """
@@ -483,7 +468,6 @@ def validate_residual_order_external(
 
     results = []
     for ord_val in orders:
-        # select subset of eigenpairs by residual
         idx_kept, _ = model.filter_by_residual(order=ord_val,
                                                keep_conjugates=keep_conjugates)
 
@@ -502,10 +486,8 @@ def validate_residual_order_external(
             "idx_kept": idx_kept,
         })
 
-    # choose best
     best = min(results, key=lambda d: d["score"])
 
-    # leave model at best selection if desired
     _restore_spectrum(model, snap0)
     if apply_best:
         model.filter_by_residual(order=best["order"],
