@@ -380,7 +380,6 @@ class ResDMD:
         
         t_window = self.dt * np.arange(len(dat))
         weights = np.exp(t_window-t_window[-1])
-
         X_truth = dat - self.mean_vec_[None, :] #(N, m)
         x0 = X_truth[0]
 
@@ -390,12 +389,12 @@ class ResDMD:
         b_te, *_ = np.linalg.lstsq(self.Phi_, x0, rcond=None)
         Xrec = _dmd_reconstruct(self.Phi_, self.lam_, b_te, np.arange(N)).real.T  # (N, m)
         _err = X_truth - Xrec   # (N, m)
-
+        
         rel_err = np.linalg.norm(weights[:, None]*_err) / np.linalg.norm(X_truth)
         rmse    = np.sqrt(np.mean((X_truth - Xrec) ** 2))
 
         if add_back_mean:
-            Xrec_out = Xrec + self.mean_vec_[:, None]
+            Xrec_out = Xrec + self.mean_vec_[None, :]
         else:
             Xrec_out = Xrec
 

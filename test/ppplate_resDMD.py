@@ -147,7 +147,7 @@ print(f"[Validation] best order={best['order']}, score={best['score']:.3e}, kept
 print("Per-seq scores (H_valid):", best["per_seq"])
 
 # final test
-N_test = 801
+N_test = 80
 rel, rmse = model.evaluate(H_test, N_test)
 print(f"[Test {H_test}°] rel={rel:.3e}, rmse={rmse:.3e}")
 
@@ -158,12 +158,12 @@ res = model.reconstruct_sequence(H_test, N_test, add_back_mean=True)
 
 X_test_pred  = res["Xrec"].T
 X_test_truth = res["X_demeaned_truth"].T  
-X_test_truth_full = X_test_truth + model.mean_vec_[None, :]
+X_test_truth_full = X_test_truth + model.mean_vec_[:, None]
 error = np.abs(X_test_truth_full - X_test_pred)
 
 order = all_results[69]['order'] # best order by looking at the "all_results"
-filename = model_dir + f"/ppplate/ppplate_ResDMD_rank_{order}_2.npy"
-np.save(filename, X_test_pred)
+filename = model_dir + f"/ppplate/ppplate_ResDMD_rank_{order}.npy"
+np.save(filename, X_test_pred.T)
 
 idx_kept, _ = model.filter_by_residual(order="full",
                                                keep_conjugates=True)
