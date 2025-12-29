@@ -1,12 +1,31 @@
+"""
+This script is taken from the CANDyMan repo for the KS Beating Dynamics
+
+We only modified the code for
+(1) loading a new dataset
+(2) adding timers to record computational costs
+(3) saving data for comparison
+
+In addition, we also extended the simulation time from 10000 steps to 14000 steps.
+"""
+
+import sys
+from pathlib import Path
+root = Path.cwd().resolve().parents[1]
+sys.path.insert(0, str(root))
+
+data_dir = str(root) + "/diffusion_maps/data"
+
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.neighbors import kneighbors_graph
 from sklearn.cluster import KMeans
-from overlap import overlap
-from chartMap import autoencoder
+from CandyMan.overlap import overlap
+from CandyMan.chartMap import autoencoder
 import keras
 import tensorflow as tf
 import scipy.io
+import time
 
 def nnDyn(n, nnStruct, nnAct, X0, X1, optArgs = {}, trainArgs = {}):
     # Set precision
@@ -26,10 +45,30 @@ def nnDyn(n, nnStruct, nnAct, X0, X1, optArgs = {}, trainArgs = {}):
     nnEvolve.fit(X0, X1, **trainArgs)
     return nnEvolve
 
-# Load beating travelling wave data
+import pickle
+
+NT = 5000000
+SKP = 500000
+DT = 0.001
+TS = 10
+data = pickle.load(open(data_dir + f"/cached_data/ksdata_traveling_NT_{NT}_SKP_{SKP}_dt_{DT}_ts_{TS}.pkl", "rb"))
+dt = data['dt']
+xx = data['x']
+tt = data['t']
+uu = data['udata']
+
 nSamples = 100
-mat = scipy.io.loadmat('ksdataBeatingTravelling.mat')
-X = mat['udata'].transpose()
+Noffset = 6000
+Ntest = 14000
+X = uu[:nSamples]
+Xtest = uu[Noffset:Noffset+Ntest]
+
+mat = {
+    'x' : xx,
+    't' : tt[:nSamples]
+}
+
+t1 = time.time()
 
 # Create k-NN graph
 nNeighbors = 4
@@ -131,6 +170,7 @@ for i in range(nClus):
     phaseDyn[i] = nnDyn(nDim, nnStruct, nnAct, chartMaps[i].encode(Xshift[ind, :]), dphi[ind], optArgs, trainArgs)
 
 print("Done")
+t2 = time.time()
 
 # Store encoded versions of all points
 XshiftEncode = np.empty((nClus, ), dtype = object)
@@ -161,18 +201,29 @@ ax[1].set_ylabel('x')
 ax[2].set_xlabel('t')
 ax[2].set_ylabel('x')
 
+
+t3 = time.time()
 # Dynamics part
 # Evolve an initial condition forward in time using the charts and dynamics 
 # on them
-x0 = Xshift[0:1, :]
-phi0 = phi[0:1]
+# x0 = Xshift[0:1, :]
+# phi0 = phi[0:1]
+
+XhatTest = np.fft.fft(Xtest)
+phiTest = np.angle(XhatTest[:, 1])
+wav = np.concatenate((np.arange(33), np.arange(-31, 0)))
+XhatTestShift = XhatTest*np.exp(-1j*np.outer(phiTest, wav))
+XTestshift = np.real(np.fft.ifft(XhatTestShift))
+
+x0 = XTestshift[0:1, :]
+phi0 = phiTest[0:1]
 
 # Find which cluster the point is in initially, map into local coordinates
 clusNew = kmeans.predict(x0)[0]
 y = chartMaps[clusNew].encode(x0)
 
 # Evolve the point forward in time
-nsteps = 10000
+nsteps = 14000
 yArr = np.zeros((nsteps + 1, nDim))
 yArr[0, :] = y
 xArr = np.zeros((nsteps + 1, Xshift.shape[1]))
@@ -203,6 +254,8 @@ xArrHat = np.fft.fft(xArr)
 xArrHat = xArrHat*np.exp(1j*np.outer(phiArr, wav))
 xArrShift = np.real(np.fft.ifft(xArrHat))
 
+t4 = time.time()
+
 fig, ax = plt.subplots()
 t = np.arange(0, (nsteps + 1)*0.01, 0.01)
 c = ax.contourf(t, x, np.append(xArrShift, xArrShift[:, 0:1], axis = 1).transpose(), levels = np.linspace(-12, 12, 23), cmap = 'RdBu_r')
@@ -210,4 +263,12 @@ ax.set_title('Evolved trajectory')
 fig.colorbar(c, ax = ax, ticks = [-12, 0, 12])
 ax.set_xlabel('t')
 ax.set_ylabel('x')
-    
+fig.savefig('./candyman_res/candyman_traj.png', bbox_inches='tight', dpi=500)
+
+plt.show()
+
+print(t2-t1, t4-t3)
+
+import pickle
+dat = np.append(xArrShift, xArrShift[:, 0:1], axis = 1)
+pickle.dump((t, x, dat), open('./candyman_res/kst.pkl', 'wb'))
