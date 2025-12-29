@@ -1,7 +1,7 @@
 # Diffusion Maps
 
 ## Description
-This repositories contains code implementation of the paper "Learning solution operator of dynamical systems with diffusion maps kernel ridge regression", which can be found in https://arxiv.org/abs/2512.17203.
+This repository contains code implementation of the paper "Learning solution operator of dynamical systems with diffusion maps kernel ridge regression", which can be found in https://arxiv.org/abs/2512.17203.
 
 ## Table of Contents
 - [Installation](#installation)

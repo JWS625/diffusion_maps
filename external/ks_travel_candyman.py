@@ -263,7 +263,7 @@ ax.set_title('Evolved trajectory')
 fig.colorbar(c, ax = ax, ticks = [-12, 0, 12])
 ax.set_xlabel('t')
 ax.set_ylabel('x')
-fig.savefig('./candyman_res/candyman_traj.png', bbox_inches='tight', dpi=500)
+# fig.savefig('./trained_mdls/candyman_traj.png', bbox_inches='tight', dpi=500)
 
 plt.show()
 
@@ -271,4 +271,4 @@ print(t2-t1, t4-t3)
 
 import pickle
 dat = np.append(xArrShift, xArrShift[:, 0:1], axis = 1)
-pickle.dump((t, x, dat), open('./candyman_res/kst.pkl', 'wb'))
+pickle.dump((t, x, dat), open('./trained_mdls/kst.pkl', 'wb'))
