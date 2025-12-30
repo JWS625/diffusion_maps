@@ -173,7 +173,7 @@ def test():
 
 
 def evaluate_performance(epsilon, lambda_reg, device, trial_loop):
-    trial_ind = 4 * trial_loop + device
+    trial_ind = devices * trial_loop + device
     _x0 = x0_lst[trial_ind]
     with cp.cuda.Device(device):
         model = Modeler(**opts)
